@@ -38,6 +38,19 @@ type PageCountResult = {
 const DB_NAME = 'OnyxDB';
 
 /**
+ * Identifier of the SQLCipher encryption key for OnyxDB. The key material
+ * itself never passes through JavaScript: react-native-nitro-sqlite resolves
+ * (and on first use generates) the actual 32-byte key in the native layer,
+ * stored in the iOS Keychain / Android Keystore-backed storage.
+ *
+ * NOTE: Encryption requires react-native-nitro-sqlite to be built with
+ * SQLCipher support (NITRO_SQLITE_SQLCIPHER=1 on iOS, nitroSqliteSqlcipher=true
+ * on Android). There is no plaintext->encrypted migration yet, so this only
+ * works for fresh installs.
+ */
+const DB_KEY_ID = 'onyx-db';
+
+/**
  * Prevents the stringifying of the object markers.
  */
 function objectMarkRemover(key: string, value: unknown) {
@@ -72,7 +85,7 @@ const provider: StorageProvider<NitroSQLiteConnection | undefined> = {
      * Initializes the storage provider
      */
     init() {
-        provider.store = open({name: DB_NAME});
+        provider.store = open({name: DB_NAME, keyId: DB_KEY_ID});
 
         provider.store.execute('CREATE TABLE IF NOT EXISTS keyvaluepairs (record_key TEXT NOT NULL PRIMARY KEY , valueJSON JSON NOT NULL) WITHOUT ROWID;');
 
