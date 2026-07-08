@@ -3,7 +3,7 @@
  * converting the value to a JSON string
  */
 import type {BatchQueryCommand, NitroSQLiteConnection} from 'react-native-nitro-sqlite';
-import {open} from 'react-native-nitro-sqlite';
+import {databaseExists, NitroSQLite, open} from 'react-native-nitro-sqlite';
 import {getFreeDiskStorage} from 'react-native-device-info';
 import type {FastMergeReplaceNullPatch} from '../../utils';
 import utils from '../../utils';
@@ -35,7 +35,19 @@ type PageCountResult = {
     page_count: number;
 };
 
-const DB_NAME = 'OnyxDB';
+/**
+ * Name of the legacy, unencrypted database. Only ever used as a migration
+ * source: if this file exists on disk, its contents are copied into the
+ * encrypted database once, and the file is deleted afterwards.
+ */
+const LEGACY_DB_NAME = 'OnyxDB';
+
+/**
+ * Name of the encrypted (SQLCipher) database. This is the only database the
+ * provider works with; the name is versioned separately from the legacy one so
+ * that the migration never needs to move/rename database files.
+ */
+const DB_NAME = 'OnyxDBEncrypted';
 
 /**
  * Identifier of the SQLCipher encryption key for OnyxDB. The key material
@@ -45,10 +57,81 @@ const DB_NAME = 'OnyxDB';
  *
  * NOTE: Encryption requires react-native-nitro-sqlite to be built with
  * SQLCipher support (NITRO_SQLITE_SQLCIPHER=1 on iOS, nitroSqliteSqlcipher=true
- * on Android). There is no plaintext->encrypted migration yet, so this only
- * works for fresh installs.
+ * on Android).
  */
 const DB_KEY_ID = 'onyx-db';
+
+/**
+ * Value of `PRAGMA user_version` in the encrypted database marking that the
+ * legacy database migration has completed. `user_version` is a 4-byte integer
+ * stored in the SQLite file header, fully reserved for the application, and
+ * writes to it are transactional — which makes it a crash-safe migration
+ * marker when set inside the same transaction that copies the data (the same
+ * pattern Android's SQLiteOpenHelper/Signal use for schema versioning).
+ *
+ * `0` (the default of any fresh database) means the migration transaction has
+ * never committed; `>= 1` guarantees all legacy data is present.
+ */
+const STORAGE_VERSION_MIGRATED = 1;
+
+const CREATE_TABLE_QUERY = 'CREATE TABLE IF NOT EXISTS keyvaluepairs (record_key TEXT NOT NULL PRIMARY KEY , valueJSON JSON NOT NULL) WITHOUT ROWID;';
+
+type UserVersionResult = {
+    user_version: number;
+};
+
+/**
+ * One-time, idempotent, crash-safe migration of the legacy plaintext database
+ * into the encrypted one. Safe to call on every startup, BEFORE the provider
+ * starts using the encrypted database:
+ *
+ *  - no legacy database on disk -> no-op (fresh install or already cleaned up)
+ *  - legacy exists, `user_version` of the target is 0 -> copy all rows and the
+ *    completion marker in ONE transaction (a crash at any point rolls back to
+ *    a clean "not migrated" state and the copy restarts on next launch)
+ *  - legacy exists, `user_version` >= 1 -> the migration transaction committed
+ *    earlier but the legacy file was not deleted yet (crash in between) ->
+ *    just delete it
+ *
+ * The legacy database is never modified, only read and finally deleted.
+ */
+function migrateLegacyDatabase(targetDb: NitroSQLiteConnection) {
+    if (!databaseExists(LEGACY_DB_NAME)) {
+        return;
+    }
+
+    const userVersion = targetDb.execute<UserVersionResult>('PRAGMA user_version;').rows?.item(0)?.user_version ?? 0;
+
+    if (userVersion < STORAGE_VERSION_MIGRATED) {
+        // The legacy database is plaintext, so it must be attached with an
+        // explicit empty key — otherwise it would inherit the encrypted
+        // connection's key and fail to open.
+        targetDb.attach(LEGACY_DB_NAME, 'legacy', undefined, true);
+        try {
+            // Guard against a legacy file without the expected table (e.g. a
+            // file created but never initialized) — there is nothing to copy
+            // then, but the migration should still complete and clean up.
+            const hasLegacyTable = (targetDb.execute("SELECT 1 FROM legacy.sqlite_master WHERE type = 'table' AND name = 'keyvaluepairs';").rows?.length ?? 0) > 0;
+
+            targetDb.execute('BEGIN;');
+            if (hasLegacyTable) {
+                targetDb.execute('INSERT OR IGNORE INTO keyvaluepairs SELECT * FROM legacy.keyvaluepairs;');
+            }
+            targetDb.execute(`PRAGMA user_version = ${STORAGE_VERSION_MIGRATED};`);
+            targetDb.execute('COMMIT;');
+        } catch (error) {
+            targetDb.execute('ROLLBACK;');
+            throw error;
+        } finally {
+            targetDb.detach('legacy');
+        }
+    }
+
+    // Reaching this point guarantees all legacy data is committed into the
+    // encrypted database (either just now or in a previous run), so the
+    // plaintext file can be safely removed.
+    NitroSQLite.drop(LEGACY_DB_NAME);
+}
 
 /**
  * Prevents the stringifying of the object markers.
@@ -87,7 +170,9 @@ const provider: StorageProvider<NitroSQLiteConnection | undefined> = {
     init() {
         provider.store = open({name: DB_NAME, keyId: DB_KEY_ID});
 
-        provider.store.execute('CREATE TABLE IF NOT EXISTS keyvaluepairs (record_key TEXT NOT NULL PRIMARY KEY , valueJSON JSON NOT NULL) WITHOUT ROWID;');
+        provider.store.execute(CREATE_TABLE_QUERY);
+
+        migrateLegacyDatabase(provider.store);
 
         // All of the 3 pragmas below were suggested by SQLite team.
         // You can find more info about them here: https://www.sqlite.org/pragma.html
