@@ -5,6 +5,8 @@ import {
   SQLITE_PLAINTEXT_DB_NAME,
   SQLITE_STORAGE_VERSION_MIGRATED,
 } from "../storage/providers/SQLiteConstants";
+import type { PageCountResult, PageSizeResult } from "../storage/providers/SQLiteTypes";
+import getMigrationCacheKiB from "./getMigrationCacheKiB";
 import type { MigrateSQLiteStorageToEncrypted, MigrationResult } from "./types";
 
 type UserVersionResult = {
@@ -45,6 +47,21 @@ const migrateSQLiteStorageToEncrypted: MigrateSQLiteStorageToEncrypted = ({
       // otherwise it would inherit the encrypted connection's key.
       targetDb.attach(SQLITE_PLAINTEXT_DB_NAME, "legacy", undefined, true);
       try {
+        // Size the page cache to the source DB and the memory available on this device (see
+        // getMigrationCacheKiB). A negative cache_size is a KiB memory bound, so SQLite spills
+        // to disk rather than over-allocating on a constrained device.
+        const legacyPageCount =
+          targetDb.execute<PageCountResult>("PRAGMA legacy.page_count;").rows?.item(0)
+            ?.page_count ?? 0;
+        const legacyPageSize =
+          targetDb.execute<PageSizeResult>("PRAGMA legacy.page_size;").rows?.item(0)
+            ?.page_size ?? 0;
+        const availableMemoryBytes = NitroSQLite.native.getAvailableMemory();
+        const cacheKiB = getMigrationCacheKiB(legacyPageCount * legacyPageSize, availableMemoryBytes);
+        // TEMP (remove before PR): log cache sizing so we can verify it on each test run.
+        console.warn(`[SQLCipher migration] availableMemoryBytes=${availableMemoryBytes} cacheKiB=${cacheKiB}`);
+        targetDb.execute(`PRAGMA cache_size = -${cacheKiB};`);
+
         const hasLegacyTable =
           (targetDb.execute(
             "SELECT 1 FROM legacy.sqlite_master WHERE type = 'table' AND name = 'keyvaluepairs';",

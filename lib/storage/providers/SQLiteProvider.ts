@@ -13,6 +13,7 @@ import {
   SQLITE_ENCRYPTED_DB_NAME,
   SQLITE_PLAINTEXT_DB_NAME,
 } from "./SQLiteConstants";
+import type { PageCountResult, PageSizeResult } from "./SQLiteTypes";
 import type { FastMergeReplaceNullPatch } from "../../utils";
 import utils from "../../utils";
 import type StorageProvider from "./types";
@@ -27,20 +28,6 @@ import classifySQLiteError from "./classifySQLiteError";
 type OnyxSQLiteKeyValuePair = {
   record_key: string;
   valueJSON: string;
-};
-
-/**
- * The result of the `PRAGMA page_size`, which gets the page size of the SQLite database
- */
-type PageSizeResult = {
-  page_size: number;
-};
-
-/**
- * The result of the `PRAGMA page_count`, which gets the page count of the SQLite database
- */
-type PageCountResult = {
-  page_count: number;
 };
 
 /**
