@@ -59,8 +59,8 @@ const storage: Storage = {
      * Initializes all providers in the list of storage providers
      * and enables fallback providers if necessary
      */
-    init() {
-        tryOrDegradePerformance(provider.init, false).finally(() => {
+    init(keyId) {
+        tryOrDegradePerformance(() => provider.init(keyId), false).finally(() => {
             finishInitalization();
         });
     },

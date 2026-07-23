@@ -311,12 +311,36 @@ type ExpandOnyxKeys<TKey extends OnyxKey> = TKey extends CollectionKeyBase ? NoI
 type OnyxUpdate<TKey extends OnyxKey> = {
     // ⚠️ DO NOT CHANGE THIS TYPE, UNLESS YOU KNOW WHAT YOU ARE DOING. ⚠️
     [K in TKey]:
-        | {onyxMethod: typeof OnyxUtils.METHOD.SET; key: ExpandOnyxKeys<K>; value: OnyxSetInput<K>}
-        | {onyxMethod: typeof OnyxUtils.METHOD.MULTI_SET; key: ExpandOnyxKeys<K>; value: OnyxMultiSetInput}
-        | {onyxMethod: typeof OnyxUtils.METHOD.MERGE; key: ExpandOnyxKeys<K>; value: OnyxMergeInput<K>}
-        | {onyxMethod: typeof OnyxUtils.METHOD.CLEAR; key: ExpandOnyxKeys<K>; value?: never}
-        | {onyxMethod: typeof OnyxUtils.METHOD.MERGE_COLLECTION; key: K; value: OnyxMergeCollectionInput<K>}
-        | {onyxMethod: typeof OnyxUtils.METHOD.SET_COLLECTION; key: K; value: OnyxSetCollectionInput<K>};
+        | {
+              onyxMethod: typeof OnyxUtils.METHOD.SET;
+              key: ExpandOnyxKeys<K>;
+              value: OnyxSetInput<K>;
+          }
+        | {
+              onyxMethod: typeof OnyxUtils.METHOD.MULTI_SET;
+              key: ExpandOnyxKeys<K>;
+              value: OnyxMultiSetInput;
+          }
+        | {
+              onyxMethod: typeof OnyxUtils.METHOD.MERGE;
+              key: ExpandOnyxKeys<K>;
+              value: OnyxMergeInput<K>;
+          }
+        | {
+              onyxMethod: typeof OnyxUtils.METHOD.CLEAR;
+              key: ExpandOnyxKeys<K>;
+              value?: never;
+          }
+        | {
+              onyxMethod: typeof OnyxUtils.METHOD.MERGE_COLLECTION;
+              key: K;
+              value: OnyxMergeCollectionInput<K>;
+          }
+        | {
+              onyxMethod: typeof OnyxUtils.METHOD.SET_COLLECTION;
+              key: K;
+              value: OnyxSetCollectionInput<K>;
+          };
 }[TKey];
 
 /**
@@ -401,6 +425,17 @@ type InitOptions = {
      * without hardcoding app-specific logic inside Onyx.
      */
     snapshotMergeKeys?: string[];
+
+    /**
+     * Identifier of the SQLCipher encryption key to use for the native SQLite storage provider.
+     * Passing a `keyId` tells Onyx to open the encrypted database using that key. Omitting it opens
+     * the plaintext database (the default, backwards-compatible behavior).
+     *
+     * Onyx does NOT migrate an existing plaintext database automatically. If the app previously
+     * called `init()` without a `keyId`, `migrateSQLiteStorageToEncrypted({keyId})` must be called
+     * once, BEFORE this `init()` call, to move existing data into the encrypted database.
+     */
+    keyId?: string;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

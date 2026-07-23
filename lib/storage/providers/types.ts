@@ -23,9 +23,12 @@ type StorageProvider<TStore> = {
     name: string;
 
     /**
-     * Initializes the storage provider
+     * Initializes the storage provider.
+     * @param keyId - identifier of the SQLCipher encryption key to use (native SQLite provider only).
+     * Passing a `keyId` opens the encrypted database; omitting it opens the plaintext database.
+     * Other providers ignore this argument.
      */
-    init: () => void;
+    init: (keyId?: string) => void;
 
     /**
      * Gets the value of a given key or return `null` if it's not available in storage

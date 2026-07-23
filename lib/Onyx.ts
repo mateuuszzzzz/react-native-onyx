@@ -39,10 +39,11 @@ function init({
     skippableCollectionMemberIDs = [],
     ramOnlyKeys = [],
     snapshotMergeKeys = [],
+    keyId,
 }: InitOptions): void {
     initDevTools(enableDevTools);
 
-    Storage.init();
+    Storage.init(keyId);
 
     OnyxUtils.setSkippableCollectionMemberIDs(new Set(skippableCollectionMemberIDs));
     OnyxUtils.setSnapshotMergeKeys(new Set(snapshotMergeKeys));
@@ -282,7 +283,13 @@ function merge<TKey extends OnyxKey>(key: TKey, changes: OnyxMergeInput<TKey>): 
  * @param collection Object collection keyed by individual collection member keys and values
  */
 function mergeCollection<TKey extends CollectionKeyBase>(collectionKey: TKey, collection: OnyxMergeCollectionInput<TKey>): Promise<void> {
-    return OnyxUtils.afterInit(() => OnyxUtils.mergeCollectionWithPatches({collectionKey, collection, isProcessingCollectionUpdate: true}));
+    return OnyxUtils.afterInit(() =>
+        OnyxUtils.mergeCollectionWithPatches({
+            collectionKey,
+            collection,
+            isProcessingCollectionUpdate: true,
+        }),
+    );
 }
 
 /**
@@ -321,7 +328,10 @@ function clear(keysToPreserve: OnyxKey[] = []): Promise<void> {
                 // because the notification process needs the old values in cache but at that point they will be already removed from it.
                 const keyValuesToResetAsCollection: Record<
                     OnyxKey,
-                    {oldValues: Record<string, KeyValueMapping[OnyxKey] | undefined>; newValues: Record<string, KeyValueMapping[OnyxKey] | undefined>}
+                    {
+                        oldValues: Record<string, KeyValueMapping[OnyxKey] | undefined>;
+                        newValues: Record<string, KeyValueMapping[OnyxKey] | undefined>;
+                    }
                 > = {};
 
                 const allKeys = new Set([...cachedKeys, ...initialKeys]);
@@ -350,7 +360,10 @@ function clear(keysToPreserve: OnyxKey[] = []): Promise<void> {
 
                             if (collectionKey) {
                                 if (!keyValuesToResetAsCollection[collectionKey]) {
-                                    keyValuesToResetAsCollection[collectionKey] = {oldValues: {}, newValues: {}};
+                                    keyValuesToResetAsCollection[collectionKey] = {
+                                        oldValues: {},
+                                        newValues: {},
+                                    };
                                 }
                                 keyValuesToResetAsCollection[collectionKey].oldValues[key] = oldValue;
                                 keyValuesToResetAsCollection[collectionKey].newValues[key] = newValue ?? undefined;
@@ -528,7 +541,12 @@ function update<TKey extends OnyxKey>(data: Array<OnyxUpdate<TKey>>): Promise<vo
                 );
             }
             if (!utils.isEmptyObject(batchedCollectionUpdates.set)) {
-                promises.push(() => OnyxUtils.partialSetCollection({collectionKey, collection: batchedCollectionUpdates.set as OnyxSetCollectionInput<OnyxKey>}));
+                promises.push(() =>
+                    OnyxUtils.partialSetCollection({
+                        collectionKey,
+                        collection: batchedCollectionUpdates.set as OnyxSetCollectionInput<OnyxKey>,
+                    }),
+                );
             }
         }
 

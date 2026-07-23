@@ -5,6 +5,7 @@
 import type {BatchQueryCommand, NitroSQLiteConnection, QueryResult} from 'react-native-nitro-sqlite';
 import {open} from 'react-native-nitro-sqlite';
 import {getFreeDiskStorage} from 'react-native-device-info';
+import {SQLITE_CREATE_TABLE_QUERY, SQLITE_ENCRYPTED_DB_NAME, SQLITE_PLAINTEXT_DB_NAME} from './SQLiteConstants';
 import type {FastMergeReplaceNullPatch} from '../../utils';
 import utils from '../../utils';
 import type StorageProvider from './types';
@@ -42,7 +43,6 @@ type PageCountResult = {
     page_count: number;
 };
 
-const DB_NAME = 'OnyxDB';
 const SQLITE_MAX_VARIABLE_NUMBER = 32766;
 const COMPILE_OPTIONS = {
     MAX_VARIABLE_NUMBER: 'MAX_VARIABLE_NUMBER',
@@ -110,12 +110,16 @@ const provider: StorageProvider<NitroSQLiteConnection | undefined> = {
      */
     classifyError: classifySQLiteError,
     /**
-     * Initializes the storage provider
+     * Initializes the storage provider by connecting to the appropriate database.
+     * Passing a `keyId` connects to the encrypted (SQLCipher) database using that key;
+     * omitting it connects to the plaintext database. This method never migrates data —
+     * see `migrateSQLiteStorageToEncrypted` for moving an existing plaintext database
+     * to the encrypted one.
      */
-    init() {
-        provider.store = open({name: DB_NAME});
+    init(keyId) {
+        provider.store = keyId ? open({name: SQLITE_ENCRYPTED_DB_NAME, keyId}) : open({name: SQLITE_PLAINTEXT_DB_NAME});
 
-        provider.store.execute('CREATE TABLE IF NOT EXISTS keyvaluepairs (record_key TEXT NOT NULL PRIMARY KEY , valueJSON JSON NOT NULL) WITHOUT ROWID;');
+        provider.store.execute(SQLITE_CREATE_TABLE_QUERY);
 
         // All of the 3 pragmas below were suggested by SQLite team.
         // You can find more info about them here: https://www.sqlite.org/pragma.html

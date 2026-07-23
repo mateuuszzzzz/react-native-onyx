@@ -2,23 +2,53 @@
  * Mock for `react-native-nitro-sqlite` backed by `better-sqlite3`, enabling
  * Node-level integration tests against a real SQLite engine.
  *
+ * Databases are file-backed (one file per name under a per-process temp dir) so
+ * on-disk semantics behave like the real engine: `databaseExists` checks the
+ * file, `close()` keeps the file, data survives close/reopen, and cross-database
+ * `ATTACH DATABASE` works between two named databases.
+ *
  * Implements the NitroSQLite surface used by
- * `lib/storage/providers/SQLiteProvider.ts`:
+ * `lib/storage/providers/SQLiteProvider.ts` and
+ * `lib/migrateSQLiteStorageToEncrypted/index.native.ts`:
  *   - open({name})
  *   - connection.execute(sql)
  *   - connection.executeAsync<T>(sql, params?)
  *   - connection.executeBatchAsync([{query, params}, ...])
+ *   - connection.attach(dbNameToAttach, alias) / connection.detach(alias)
+ *   - databaseExists(name)
+ *   - NitroSQLite.native.drop(name)
+ *
+ * Encryption is NOT emulated (better-sqlite3 has no SQLCipher codec): `keyId` is
+ * accepted and ignored, so tests exercise the migration state machine, not the
+ * cipher.
  *
  * Result rows are shaped to match Nitro: `{rows: {_array, item, length}}`.
  */
 import BetterSqlite3 from 'better-sqlite3';
 import type {Database} from 'better-sqlite3';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type {BatchQueryCommand, NitroSQLiteConnection, NitroSQLiteQueryResultRows, QueryResult, QueryResultRow, SQLiteQueryParams} from 'react-native-nitro-sqlite';
 
 // `better-sqlite3` is declared as `export = Database` (CommonJS), so the type is
 // derived from the default import's namespace rather than via a named type import.
 
-const databases = new Map<string, Database>();
+// One temp directory per test process so parallel jest workers never collide on
+// database files that share a name.
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onyx-sqlite-mock-'));
+
+// Currently-open connections keyed by database name. Closing removes the entry
+// (the file stays on disk); the next open() reconnects to the same file.
+const connections = new Map<string, Database>();
+
+function dbPath(name: string): string {
+    return path.join(dbDir, `${name}.sqlite`);
+}
+
+// Transaction-control and attach/detach statements cannot go through
+// `Statement#run` in better-sqlite3 — they must be issued via `Database#exec`.
+const RAW_EXEC_STATEMENT = /^\s*(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|ATTACH|DETACH)\b/i;
 
 /**
  * Returns the named-placeholder identifiers (`:name`) in the order of first
@@ -106,7 +136,7 @@ function runOne<TRow extends QueryResultRow>(database: Database, sql: string, pa
     // each statement separately, so this branch is rarely hit, but keep it
     // defensive.
     const semicolons = (sql.match(/;/g) ?? []).length;
-    if (semicolons > 1 || (semicolons === 1 && !sql.trim().endsWith(';'))) {
+    if (semicolons > 1 || (semicolons === 1 && !sql.trim().endsWith(';')) || RAW_EXEC_STATEMENT.test(sql)) {
         database.exec(sql);
         return {rowsAffected: 0} as QueryResult<TRow>;
     }
@@ -125,11 +155,11 @@ function runOne<TRow extends QueryResultRow>(database: Database, sql: string, pa
     return {rowsAffected: info.changes, insertId: Number(info.lastInsertRowid)} as QueryResult<TRow>;
 }
 
-function makeConnection(name: string): Pick<NitroSQLiteConnection, 'execute' | 'executeAsync' | 'executeBatchAsync' | 'close'> {
-    let database = databases.get(name);
-    if (!database) {
-        database = new BetterSqlite3(':memory:');
-        databases.set(name, database);
+function makeConnection(name: string): Pick<NitroSQLiteConnection, 'execute' | 'executeAsync' | 'executeBatchAsync' | 'close' | 'attach' | 'detach'> {
+    let database = connections.get(name);
+    if (!database || !database.open) {
+        database = new BetterSqlite3(dbPath(name));
+        connections.set(name, database);
     }
     const connection = database;
 
@@ -164,29 +194,83 @@ function makeConnection(name: string): Pick<NitroSQLiteConnection, 'execute' | '
             }
         },
 
+        // Nitro's `plaintext`/`location` args have no effect here (no cipher, and
+        // every database lives under the same temp dir), so only the file path is
+        // resolved from the name.
+        attach(dbNameToAttach, alias) {
+            connection.exec(`ATTACH DATABASE '${dbPath(dbNameToAttach)}' AS ${alias};`);
+        },
+
+        detach(alias) {
+            connection.exec(`DETACH DATABASE ${alias};`);
+        },
+
         close() {
             connection.close();
-            databases.delete(name);
+            connections.delete(name);
         },
     };
 }
 
-function open({name}: {name: string}) {
+function open({name}: {name: string; keyId?: string}) {
     return makeConnection(name);
 }
 
 /**
- * Test helper — wipe every in-memory DB between tests.
+ * Mirrors NitroSQLite's `databaseExists` — checks for the database file on disk,
+ * independent of whether a connection is currently open.
+ */
+function databaseExists(name: string): boolean {
+    return fs.existsSync(dbPath(name));
+}
+
+/**
+ * Mirrors `NitroSQLite.native.drop` — closes any open connection and deletes the
+ * database file (plus any sidecar journal/WAL files).
+ */
+function drop(name: string) {
+    const existing = connections.get(name);
+    if (existing) {
+        try {
+            existing.close();
+        } catch {
+            /* ignore */
+        }
+        connections.delete(name);
+    }
+    for (const suffix of ['', '-journal', '-wal', '-shm']) {
+        try {
+            fs.rmSync(dbPath(name) + suffix);
+        } catch {
+            /* ignore */
+        }
+    }
+}
+
+const NitroSQLite = {
+    native: {drop},
+};
+
+/**
+ * Test helper — close every open connection and delete every database file so
+ * each test starts from a clean disk.
  */
 function resetAllDatabases() {
-    for (const database of databases.values()) {
+    for (const database of connections.values()) {
         try {
             database.close();
         } catch {
             /* ignore */
         }
     }
-    databases.clear();
+    connections.clear();
+    for (const file of fs.readdirSync(dbDir)) {
+        try {
+            fs.rmSync(path.join(dbDir, file));
+        } catch {
+            /* ignore */
+        }
+    }
 }
 
-export {open, resetAllDatabases};
+export {open, databaseExists, NitroSQLite, resetAllDatabases};
