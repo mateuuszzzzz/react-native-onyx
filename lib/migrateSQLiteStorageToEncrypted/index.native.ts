@@ -43,7 +43,9 @@ const migrateSQLiteStorageToEncrypted: MigrateSQLiteStorageToEncrypted = ({keyId
                 // to disk rather than over-allocating on a constrained device.
                 const legacyPageCount = targetDb.execute<PageCountResult>('PRAGMA legacy.page_count;').rows?.item(0)?.page_count ?? 0;
                 const legacyPageSize = targetDb.execute<PageSizeResult>('PRAGMA legacy.page_size;').rows?.item(0)?.page_size ?? 0;
-                const availableMemoryBytes = NitroSQLite.native.getAvailableMemory();
+                // Cross-fork build-time cast: nitro's published .d.ts lag the getAvailableMemory spec method, but the
+                // native method exists at runtime. TODO: drop once nitro's lib types are rebuilt.
+                const availableMemoryBytes = (NitroSQLite.native as unknown as {getAvailableMemory: () => number}).getAvailableMemory();
                 const cacheKiB = getMigrationCacheKiB(legacyPageCount * legacyPageSize, availableMemoryBytes);
                 // TEMP (remove before PR): log cache sizing so we can verify it on each test run.
                 console.warn(`[SQLCipher migration] availableMemoryBytes=${availableMemoryBytes} cacheKiB=${cacheKiB}`);
