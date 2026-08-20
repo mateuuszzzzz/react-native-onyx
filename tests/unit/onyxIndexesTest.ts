@@ -39,7 +39,7 @@ describe('Onyx.reconcileIndexes', () => {
 
     it('creates declared-but-missing indexes and drops undeclared managed ones', async () => {
         const provider = StorageMock.getStorageProvider() as FakeIndexProvider;
-        const orphanName = computeIndexName(ONYX_KEYS.COLLECTION.PEOPLE, 'removedField');
+        const orphanName = computeIndexName(ONYX_KEYS.COLLECTION.PEOPLE, ['removedField']);
         provider.listOnyxIndexes = jest.fn(() => Promise.resolve([orphanName]));
         provider.createCollectionIndex = jest.fn(() => Promise.resolve());
         provider.dropIndex = jest.fn(() => Promise.resolve());
@@ -48,16 +48,16 @@ describe('Onyx.reconcileIndexes', () => {
         const result = await Onyx.reconcileIndexes();
 
         expect(result.supported).toBe(true);
-        expect(result.created.sort()).toEqual([computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, 'kind'), computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, 'order')].sort());
+        expect(result.created.sort()).toEqual([computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, ['kind']), computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, ['order'])].sort());
         // The orphan existed in storage but is not declared in code — reconciliation detects and drops it.
         expect(result.dropped).toEqual([orphanName]);
         expect(provider.dropIndex).toHaveBeenCalledWith(orphanName);
-        expect(provider.createCollectionIndex).toHaveBeenCalledWith(computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, 'order'), ONYX_KEYS.COLLECTION.TEST_KEY, 'order');
+        expect(provider.createCollectionIndex).toHaveBeenCalledWith(computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, ['order']), ONYX_KEYS.COLLECTION.TEST_KEY, ['order']);
     });
 
     it('is a no-op when storage already matches the declaration', async () => {
         const provider = StorageMock.getStorageProvider() as FakeIndexProvider;
-        const declaredName = computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, 'order');
+        const declaredName = computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, ['order']);
         provider.listOnyxIndexes = jest.fn(() => Promise.resolve([declaredName]));
         provider.createCollectionIndex = jest.fn(() => Promise.resolve());
         provider.dropIndex = jest.fn(() => Promise.resolve());
@@ -70,6 +70,20 @@ describe('Onyx.reconcileIndexes', () => {
         expect(provider.dropIndex).not.toHaveBeenCalled();
     });
 
+    it('supports composite indexes declared as field arrays', async () => {
+        const provider = StorageMock.getStorageProvider() as FakeIndexProvider;
+        provider.listOnyxIndexes = jest.fn(() => Promise.resolve([]));
+        provider.createCollectionIndex = jest.fn(() => Promise.resolve());
+        provider.dropIndex = jest.fn(() => Promise.resolve());
+
+        setIndexesConfig({[ONYX_KEYS.COLLECTION.TEST_KEY]: [['policyID', 'order']]});
+        const result = await Onyx.reconcileIndexes();
+
+        const compositeName = computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, ['policyID', 'order']);
+        expect(result.created).toEqual([compositeName]);
+        expect(provider.createCollectionIndex).toHaveBeenCalledWith(compositeName, ONYX_KEYS.COLLECTION.TEST_KEY, ['policyID', 'order']);
+    });
+
     it('skips invalid field names instead of generating unsafe SQL identifiers', async () => {
         const provider = StorageMock.getStorageProvider() as FakeIndexProvider;
         provider.listOnyxIndexes = jest.fn(() => Promise.resolve([]));
@@ -79,6 +93,6 @@ describe('Onyx.reconcileIndexes', () => {
         setIndexesConfig({[ONYX_KEYS.COLLECTION.TEST_KEY]: ["bad'; DROP TABLE keyvaluepairs;--", 'goodField']});
         const result = await Onyx.reconcileIndexes();
 
-        expect(result.created).toEqual([computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, 'goodField')]);
+        expect(result.created).toEqual([computeIndexName(ONYX_KEYS.COLLECTION.TEST_KEY, ['goodField'])]);
     });
 });

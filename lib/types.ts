@@ -423,7 +423,7 @@ type InitOptions = {
      * queries run unindexed with identical results.
      * @default {}
      */
-    indexes?: Partial<Record<OnyxKey, string[]>>;
+    indexes?: Partial<Record<OnyxKey, Array<string | string[]>>>;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

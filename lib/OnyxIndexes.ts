@@ -18,7 +18,16 @@ import type {OnyxKey} from './types';
 import * as Logger from './Logger';
 import Storage from './storage';
 
-type OnyxIndexesConfig = Partial<Record<OnyxKey, string[]>>;
+/**
+ * Index declarations per collection. Each entry is either a single field or an ordered list of
+ * fields (a composite index — equality-filter fields first, the sort field last). Direction is
+ * deliberately NOT declarable: SQLite walks a B-tree both ways, so one index serves `asc` and
+ * `desc` alike (mixed-direction multi-column sorts are the only case that would need it, and the
+ * query API always orders every column the same way). `record_key` is appended to every index
+ * automatically so the query's tie-break ordering is fully covered.
+ */
+type OnyxIndexDeclaration = string | string[];
+type OnyxIndexesConfig = Partial<Record<OnyxKey, OnyxIndexDeclaration[]>>;
 
 type ReconcileIndexesResult = {
     /** Whether the active storage provider supports indexes at all. */
@@ -40,10 +49,10 @@ function getIndexesConfig(): OnyxIndexesConfig {
     return indexesConfig;
 }
 
-/** Deterministic managed name for one (collection, field) index — the identity reconciliation diffs on. */
-function computeIndexName(collectionPrefix: OnyxKey, field: string): string {
+/** Deterministic managed name for one (collection, fields) index — the identity reconciliation diffs on. */
+function computeIndexName(collectionPrefix: OnyxKey, fields: string[]): string {
     const sanitizedCollection = collectionPrefix.replace(/[^A-Za-z0-9]/g, '');
-    return `${ONYX_INDEX_PREFIX}${sanitizedCollection}_${field}`;
+    return `${ONYX_INDEX_PREFIX}${sanitizedCollection}_${fields.join('_')}`;
 }
 
 /**
@@ -56,17 +65,18 @@ function reconcileIndexes(): Promise<ReconcileIndexesResult> {
         return Promise.resolve({supported: false, created: [], dropped: []});
     }
 
-    const desired = new Map<string, {collectionPrefix: OnyxKey; field: string}>();
-    for (const [collectionPrefix, fields] of Object.entries(indexesConfig)) {
-        if (!fields) {
+    const desired = new Map<string, {collectionPrefix: OnyxKey; fields: string[]}>();
+    for (const [collectionPrefix, declarations] of Object.entries(indexesConfig)) {
+        if (!declarations) {
             continue;
         }
-        for (const field of fields) {
-            if (!IDENTIFIER_PATTERN.test(field)) {
-                Logger.logAlert(`[OnyxIndexes] Skipping index with invalid field name '${field}' on '${collectionPrefix}'.`);
+        for (const declaration of declarations) {
+            const fields = Array.isArray(declaration) ? declaration : [declaration];
+            if (fields.length === 0 || fields.some((field) => !IDENTIFIER_PATTERN.test(field))) {
+                Logger.logAlert(`[OnyxIndexes] Skipping index with invalid field list [${fields.join(', ')}] on '${collectionPrefix}'.`);
                 continue;
             }
-            desired.set(computeIndexName(collectionPrefix, field), {collectionPrefix, field});
+            desired.set(computeIndexName(collectionPrefix, fields), {collectionPrefix, fields});
         }
     }
 
@@ -86,7 +96,7 @@ function reconcileIndexes(): Promise<ReconcileIndexesResult> {
                 if (!spec) {
                     continue;
                 }
-                chain = chain.then(() => provider.createCollectionIndex?.(name, spec.collectionPrefix, spec.field));
+                chain = chain.then(() => provider.createCollectionIndex?.(name, spec.collectionPrefix, spec.fields));
             }
             for (const name of namesToDrop) {
                 chain = chain.then(() => provider.dropIndex?.(name));
@@ -106,4 +116,4 @@ function reconcileIndexes(): Promise<ReconcileIndexesResult> {
 }
 
 export {setIndexesConfig, getIndexesConfig, computeIndexName, reconcileIndexes, ONYX_INDEX_PREFIX};
-export type {OnyxIndexesConfig, ReconcileIndexesResult};
+export type {OnyxIndexesConfig, OnyxIndexDeclaration, ReconcileIndexesResult};

@@ -424,23 +424,27 @@ const provider: StorageProvider<NitroSQLiteConnection | undefined> = {
             return names;
         });
     },
-    createCollectionIndex(indexName, collectionPrefix, field) {
+    createCollectionIndex(indexName, collectionPrefix, fields) {
         if (!provider.store) {
             throw new Error('Store is not initialized!');
         }
         if (!indexName.startsWith(ONYX_INDEX_PREFIX) || !/^[A-Za-z0-9_]+$/.test(indexName)) {
             return Promise.reject(new Error(`createCollectionIndex(): invalid index name '${indexName}'.`));
         }
-        if (!/^[A-Za-z0-9_]+$/.test(field)) {
-            return Promise.reject(new Error(`createCollectionIndex(): invalid field name '${field}'.`));
+        if (fields.length === 0 || fields.some((field) => !/^[A-Za-z0-9_]+$/.test(field))) {
+            return Promise.reject(new Error(`createCollectionIndex(): invalid field list [${fields.join(', ')}].`));
         }
 
         // A PARTIAL expression index scoped to the collection's key range. The range literals here
-        // must textually imply the (also literal) range in queryByPrefix, and the indexed expression
+        // must textually imply the (also literal) range in queryByPrefix, and the indexed expressions
         // must textually match the query's — both are generated from the same inputs, so they do.
+        // `record_key` is appended so the query's `ORDER BY <expr> DIR, record_key DIR` tie-break is
+        // fully covered by the index (no residual sorter). One index serves asc and desc alike —
+        // SQLite walks the B-tree in either direction when all columns share one direction.
         const upperBound = collectionPrefix.slice(0, -1) + String.fromCharCode(collectionPrefix.charCodeAt(collectionPrefix.length - 1) + 1);
+        const indexedExpressions = [...fields.map((field) => `json_extract(valueJSON, '$.${field}')`), 'record_key'];
         const command = `CREATE INDEX IF NOT EXISTS ${indexName}
-            ON keyvaluepairs (json_extract(valueJSON, '$.${field}'))
+            ON keyvaluepairs (${indexedExpressions.join(', ')})
             WHERE record_key >= '${escapeSQLiteStringLiteral(collectionPrefix)}' AND record_key < '${escapeSQLiteStringLiteral(upperBound)}';`;
         return provider.store.executeAsync(command).then(() => undefined);
     },

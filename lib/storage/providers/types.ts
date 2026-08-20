@@ -107,7 +107,7 @@ type StorageProvider<TStore> = {
     /**
      * Creates an index accelerating `queryByPrefix` over one collection field. Optional.
      */
-    createCollectionIndex?: (indexName: string, collectionPrefix: OnyxKey, field: string) => Promise<void>;
+    createCollectionIndex?: (indexName: string, collectionPrefix: OnyxKey, fields: string[]) => Promise<void>;
 
     /**
      * Drops an Onyx-managed index by name. Optional.
