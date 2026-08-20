@@ -1,4 +1,5 @@
 import type {ValueOf} from 'type-fest';
+
 import type {OnyxKey, OnyxValue} from '../../types';
 import type {FastMergeReplaceNullPatch} from '../../utils';
 import type {StorageErrorClass} from '../errors';
@@ -68,6 +69,13 @@ type StorageProvider<TStore> = {
      * More efficient than getAllKeys + multiGet for loading the entire database.
      */
     getAll: () => Promise<StorageKeyValuePair[]>;
+
+    /**
+     * Returns all key-value pairs whose key starts with the given prefix in a single batch read.
+     * Used for on-demand hydration of a lazy collection. Optional — callers fall back to
+     * getAllKeys + multiGet when a provider does not implement it.
+     */
+    getByPrefix?: (prefix: OnyxKey) => Promise<StorageKeyValuePair[]>;
 
     /**
      * Removes given key and its value from storage

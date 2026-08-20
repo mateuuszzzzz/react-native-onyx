@@ -1,14 +1,11 @@
-import {shallowEqual} from 'fast-equals';
 import type {ValueOf} from 'type-fest';
+
+import {shallowEqual} from 'fast-equals';
 import _ from 'underscore';
-import DevTools from './DevTools';
-import * as Logger from './Logger';
+
+import type {DeferredTask} from './createDeferredTask';
 import type Onyx from './Onyx';
-import cache, {TASK} from './OnyxCache';
-import OnyxKeys from './OnyxKeys';
-import StorageCircuitBreaker from './StorageCircuitBreaker';
-import Storage from './storage';
-import {StorageErrorClass} from './storage/errors';
+import type {StorageKeyValuePair} from './storage/providers/types';
 import type {
     CollectionKeyBase,
     ConnectOptions,
@@ -33,11 +30,17 @@ import type {
     RetriableOnyxOperation,
 } from './types';
 import type {FastMergeOptions, FastMergeResult} from './utils';
-import utils from './utils';
-import type {DeferredTask} from './createDeferredTask';
+
 import createDeferredTask from './createDeferredTask';
-import type {StorageKeyValuePair} from './storage/providers/types';
+import DevTools from './DevTools';
+import * as Logger from './Logger';
 import logMessages from './logMessages';
+import cache, {TASK} from './OnyxCache';
+import OnyxKeys from './OnyxKeys';
+import Storage from './storage';
+import {StorageErrorClass} from './storage/errors';
+import StorageCircuitBreaker from './StorageCircuitBreaker';
+import utils from './utils';
 
 // Method constants
 const METHOD = {
@@ -144,6 +147,19 @@ function getSkippableCollectionMemberIDs(): Set<string> {
  */
 function getSnapshotMergeKeys(): Set<string> {
     return snapshotMergeKeys;
+}
+
+/** Whether the key is a collection member whose ID is configured as skippable (never cached/loaded). */
+function isSkippableMemberKey(key: OnyxKey): boolean {
+    if (!skippableCollectionMemberIDs.size || !OnyxKeys.getCollectionKey(key)) {
+        return false;
+    }
+    try {
+        const [, collectionMemberID] = OnyxKeys.splitCollectionMemberKey(key);
+        return skippableCollectionMemberIDs.has(collectionMemberID);
+    } catch (e) {
+        return false;
+    }
 }
 
 /**
@@ -455,8 +471,10 @@ function getAllKeys(): Promise<Set<OnyxKey>> {
     // Otherwise retrieve the keys from storage and capture a promise to aid concurrent usages
     const promise = Storage.getAllKeys().then((keys) => {
         // Filter out RAM-only keys from storage results as they may be stale entries
-        // from before the key was migrated to RAM-only.
-        const filteredKeys = keys.filter((key) => !OnyxKeys.isRamOnlyKey(key));
+        // from before the key was migrated to RAM-only. Also filter skippable collection member
+        // keys — init's getAll path drops them too, and the key index must stay consistent with it
+        // (write paths route on key presence in this index).
+        const filteredKeys = keys.filter((key) => !OnyxKeys.isRamOnlyKey(key) && !isSkippableMemberKey(key));
         cache.setAllKeys(filteredKeys);
 
         // return the updated set of keys
@@ -474,6 +492,12 @@ function tryGetCachedValue<TKey extends OnyxKey>(key: TKey): OnyxValue<OnyxKey> 
     let val = cache.get(key);
 
     if (OnyxKeys.isCollectionKey(key)) {
+        // A lazy collection that hasn't hydrated has no answer yet — return undefined ("unknown"),
+        // never an empty object (which readers would interpret as "genuinely empty").
+        if (cache.getHydrationState(key) !== 'hydrated') {
+            return undefined;
+        }
+
         const collectionData = cache.getCollectionData(key);
         if (collectionData !== undefined) {
             val = collectionData;
@@ -543,18 +567,28 @@ function keysChanged<TKey extends CollectionKeyBase>(
     collectionKey: TKey,
     partialCollection: OnyxCollection<KeyValueMapping[TKey]>,
     partialPreviousCollection: OnyxCollection<KeyValueMapping[TKey]> | undefined,
+    options?: {shouldUpdateRecentlyAccessed?: boolean},
 ): void {
-    const cachedCollection = getCachedCollection(collectionKey);
+    // A partially-hydrated lazy collection must never be broadcast to collection-root subscribers —
+    // they would mistake the warm subset for the whole collection (and e.g. derived values would
+    // persist computes over truncated input). Member-level subscribers are still notified below with
+    // per-key values read directly from cache; root subscribers get their consistent snapshot from
+    // the hydration-completion broadcast instead.
+    const isHydrated = cache.getHydrationState(collectionKey) === 'hydrated';
+    const cachedCollection = isHydrated ? getCachedCollection(collectionKey) : {};
     const previousCollection = partialPreviousCollection ?? {};
     const changedMemberKeys = Object.keys(partialCollection ?? {});
 
-    // Add or remove the keys from the recentlyAccessedKeys list
-    for (const memberKey of changedMemberKeys) {
-        const value = partialCollection?.[memberKey];
-        if (value !== null && value !== undefined) {
-            cache.addLastAccessedKey(memberKey, false);
-        } else {
-            cache.removeLastAccessedKey(memberKey);
+    // Add or remove the keys from the recentlyAccessedKeys list. Hydration re-notifies skip this —
+    // marking every hydrated member as recently accessed in one shot would distort the eviction LRU.
+    if (options?.shouldUpdateRecentlyAccessed ?? true) {
+        for (const memberKey of changedMemberKeys) {
+            const value = partialCollection?.[memberKey];
+            if (value !== null && value !== undefined) {
+                cache.addLastAccessedKey(memberKey, false);
+            } else {
+                cache.removeLastAccessedKey(memberKey);
+            }
         }
     }
 
@@ -571,37 +605,46 @@ function keysChanged<TKey extends CollectionKeyBase>(
         }
     }
 
-    // Notify collection-level subscribers
-    for (const subID of collectionSubscriberIDs) {
-        const subscriber = callbackToStateMapping[subID];
-        if (!subscriber || typeof subscriber.callback !== 'function') {
-            continue;
-        }
+    // Notify collection-level subscribers. Skipped while a lazy collection is not fully hydrated —
+    // the hydration completion re-broadcasts with the complete snapshot (and if hydration hasn't been
+    // triggered yet, kick it off so those subscribers converge).
+    if (isHydrated) {
+        for (const subID of collectionSubscriberIDs) {
+            const subscriber = callbackToStateMapping[subID];
+            if (!subscriber || typeof subscriber.callback !== 'function') {
+                continue;
+            }
 
-        try {
-            lastConnectionCallbackData.set(subscriber.subscriptionID, {value: cachedCollection, matchedKey: subscriber.key});
-            subscriber.callback(cachedCollection, subscriber.key);
-        } catch (error) {
-            Logger.logAlert(`[OnyxUtils.keysChanged] Subscriber callback threw an error for key '${collectionKey}': ${error}`);
+            try {
+                lastConnectionCallbackData.set(subscriber.subscriptionID, {value: cachedCollection, matchedKey: subscriber.key});
+                subscriber.callback(cachedCollection, subscriber.key);
+            } catch (error) {
+                Logger.logAlert(`[OnyxUtils.keysChanged] Subscriber callback threw an error for key '${collectionKey}': ${error}`);
+            }
         }
+    } else if (collectionSubscriberIDs.length > 0) {
+        hydrateCollection(collectionKey);
     }
 
-    // Notify member-level subscribers (e.g. subscribed to `report_123`)
+    // Notify member-level subscribers (e.g. subscribed to `report_123`). When the collection is not
+    // hydrated, per-member values are read straight from cache — writes land in cache first, so the
+    // written members are warm even though the collection as a whole is not.
     for (const subID of memberSubscriberIDs) {
         const subscriber = callbackToStateMapping[subID];
         if (!subscriber || typeof subscriber.callback !== 'function') {
             continue;
         }
 
-        if (cachedCollection[subscriber.key] === previousCollection[subscriber.key]) {
+        const memberValue = isHydrated ? cachedCollection[subscriber.key] : (cache.get(subscriber.key) as (typeof cachedCollection)[string]);
+        if (memberValue === previousCollection[subscriber.key]) {
             continue;
         }
 
         try {
             const subscriberCallback = subscriber.callback as DefaultConnectCallback<TKey>;
-            subscriberCallback(cachedCollection[subscriber.key], subscriber.key as TKey);
+            subscriberCallback(memberValue, subscriber.key as TKey);
             lastConnectionCallbackData.set(subscriber.subscriptionID, {
-                value: cachedCollection[subscriber.key],
+                value: memberValue,
                 matchedKey: subscriber.key,
             });
         } catch (error) {
@@ -667,6 +710,13 @@ function keyChanged<TKey extends OnyxKey>(
                     if (isProcessingCollectionUpdate) {
                         continue;
                     }
+                    // A collection-root subscriber must never receive a partial snapshot of a lazy,
+                    // not-yet-hydrated collection. Trigger hydration (idempotent/joinable) — its
+                    // completion broadcast will deliver the complete snapshot including this write.
+                    if (cache.getHydrationState(subscriber.key) !== 'hydrated') {
+                        hydrateCollection(subscriber.key);
+                        continue;
+                    }
                     // Cache once per dispatch to ensure all subscribers see a consistent snapshot
                     // even if a previous callback synchronously wrote to the same collection.
                     let cachedCollection = cachedCollections[subscriber.key];
@@ -713,6 +763,12 @@ function sendDataToConnection<TKey extends OnyxKey>(mapping: CallbackToStateMapp
     // For individual key subscribers, read just that key's value.
     let value: OnyxValue<TKey> | undefined;
     if (OnyxKeys.isCollectionKey(mapping.key)) {
+        // Defense in depth: never hand a collection-root subscriber a snapshot of a not-yet-hydrated
+        // lazy collection. The hydration completion broadcast will deliver it instead. Deliberately
+        // passive (no hydration trigger here) so a failing hydration cannot self-retry in a loop.
+        if (cache.getHydrationState(mapping.key) !== 'hydrated') {
+            return;
+        }
         const collection = getCachedCollection(mapping.key);
         value = Object.keys(collection).length > 0 ? (collection as OnyxValue<TKey>) : undefined;
     } else {
@@ -740,6 +796,80 @@ function getCollectionDataAndSendAsObject<TKey extends OnyxKey>(matchingKeys: Co
     multiGet(matchingKeys).then(() => {
         sendDataToConnection(mapping, mapping.key);
     });
+}
+
+/**
+ * Loads every member of a lazy collection from storage into cache and notifies subscribers.
+ *
+ * Invariants upheld here (see the lazy-hydration design):
+ * - joinable/idempotent: concurrent callers share one storage read via `TASK.HYDRATE:<key>`;
+ * - the state flips to `hydrated` only AFTER the values land in cache and BEFORE subscribers are
+ *   notified (the notification path reads the state);
+ * - cache-first writes win: `cache.hydrate` never overwrites a value already in cache;
+ * - a `clear()` racing the hydration discards the read instead of resurrecting deleted rows;
+ * - the completion broadcast bypasses the recently-accessed LRU bookkeeping.
+ *
+ * Resolves immediately for non-lazy collections, non-collection keys, and already-hydrated
+ * collections. On storage failure the collection returns to `unhydrated` (no self-retry).
+ */
+function hydrateCollection(collectionKey: OnyxKey): Promise<void> {
+    if (!OnyxKeys.isCollectionKey(collectionKey) || !cache.isLazyCollection(collectionKey)) {
+        return Promise.resolve();
+    }
+    if (cache.getHydrationState(collectionKey) === 'hydrated') {
+        return Promise.resolve();
+    }
+
+    const taskName = `${TASK.HYDRATE}:${collectionKey}` as const;
+    if (cache.hasPendingTask(taskName)) {
+        return cache.getTaskPromise(taskName) as Promise<void>;
+    }
+
+    cache.setHydrationState(collectionKey, 'hydrating');
+    const promise = Storage.getByPrefix(collectionKey)
+        .then((pairs) => {
+            // A clear() started while we were reading — these rows are being deleted; merging them
+            // would resurrect the previous user's data. Stay unhydrated; post-clear subscriptions
+            // will re-trigger hydration against the cleared storage.
+            if (cache.hasPendingTask(TASK.CLEAR)) {
+                cache.setHydrationState(collectionKey, 'unhydrated');
+                return;
+            }
+
+            const data: Record<OnyxKey, unknown> = {};
+            const previousValues: Record<OnyxKey, unknown> = {};
+            for (const [key, value] of pairs) {
+                if (OnyxKeys.isRamOnlyKey(key) || isSkippableMemberKey(key)) {
+                    continue;
+                }
+                previousValues[key] = cache.get(key);
+                data[key] = value;
+            }
+
+            cache.hydrate(data as Record<OnyxKey, OnyxValue<OnyxKey>>);
+            cache.setHydrationState(collectionKey, 'hydrated');
+
+            // Re-broadcast with the (already cache-merged) values. `previousValues` holds what was
+            // warm before hydration, so member subscribers whose value didn't actually change are
+            // deduped instead of re-notified.
+            keysChanged(collectionKey, data as OnyxCollection<KeyValueMapping[OnyxKey]>, previousValues as OnyxCollection<KeyValueMapping[OnyxKey]>, {
+                shouldUpdateRecentlyAccessed: false,
+            });
+        })
+        .catch((error) => {
+            cache.setHydrationState(collectionKey, 'unhydrated');
+            Logger.logAlert(`[OnyxUtils.hydrateCollection] Failed to hydrate collection '${collectionKey}': ${error}`);
+        });
+
+    return cache.captureTask(taskName, promise) as Promise<void>;
+}
+
+/** Whether reads of this key should present as "loading": a lazy collection that hasn't finished hydrating. */
+function isAwaitingHydration(key: OnyxKey): boolean {
+    if (!OnyxKeys.isCollectionKey(key)) {
+        return false;
+    }
+    return cache.getHydrationState(key) !== 'hydrated';
 }
 
 /**
@@ -911,7 +1041,7 @@ function prepareKeyValuePairsForStorage(
             continue;
         }
 
-        const valueWithoutNestedNullValues = shouldRemoveNestedNulls ?? true ? utils.removeNestedNullValues(value) : value;
+        const valueWithoutNestedNullValues = (shouldRemoveNestedNulls ?? true) ? utils.removeNestedNullValues(value) : value;
 
         if (valueWithoutNestedNullValues !== undefined) {
             pairs.push([key, valueWithoutNestedNullValues, replaceNullPatches?.[key]]);
@@ -991,37 +1121,70 @@ function mergeInternal<TValue extends OnyxInput<OnyxKey> | undefined, TChange ex
 /**
  * Merge user provided default key value pairs.
  */
-function initializeWithDefaultKeyStates(): Promise<void> {
-    // Eagerly load the entire database into cache in a single batch read.
-    // This is faster than lazy-loading individual keys because:
-    // 1. One DB transaction instead of hundreds
-    // 2. All subsequent reads are synchronous cache hits
-    return Storage.getAll()
-        .then((pairs) => {
+/**
+ * Loads the initial data set into cache and returns it.
+ *
+ * Eager mode (no `lazyCollections` configured — the default): the entire database in one batch read.
+ * This is faster than lazy-loading individual keys because it is one DB transaction instead of
+ * hundreds, and all subsequent reads are synchronous cache hits.
+ *
+ * Lazy mode: only the complete KEY index plus the values of eager keys (every key that does not
+ * belong to a lazy collection, which always includes the `initialKeyStates` singletons). Lazy
+ * collections' values stay on disk until `hydrateCollection` loads them on first subscription.
+ * The key index is always loaded completely — `Onyx.clear` derives its delete list from it, so an
+ * incomplete index would leak data across accounts.
+ */
+function loadInitialData(): Promise<Record<string, unknown>> {
+    if (!cache.hasLazyCollections()) {
+        return Storage.getAll().then((pairs) => {
             const allDataFromStorage: Record<string, unknown> = {};
             for (const [key, value] of pairs) {
                 // RAM-only keys should not be cached from storage as they may have stale persisted data
-                // from before the key was migrated to RAM-only.
-                if (OnyxKeys.isRamOnlyKey(key)) {
+                // from before the key was migrated to RAM-only. Skippable collection members are never loaded.
+                if (OnyxKeys.isRamOnlyKey(key) || isSkippableMemberKey(key)) {
                     continue;
-                }
-
-                // Skip collection members that are marked as skippable
-                if (skippableCollectionMemberIDs.size && OnyxKeys.getCollectionKey(key)) {
-                    const [, collectionMemberID] = OnyxKeys.splitCollectionMemberKey(key);
-
-                    if (skippableCollectionMemberIDs.has(collectionMemberID)) {
-                        continue;
-                    }
                 }
 
                 allDataFromStorage[key] = value;
             }
 
-            // Load all storage data into cache silently (no subscriber notifications)
+            // Load all storage data into cache silently (no subscriber notifications). `hydrate`
+            // assigns values directly — storage is the source of truth here and nothing meaningful
+            // is cached yet, so the deep-copying `merge` path would only double peak memory.
             cache.setAllKeys(Object.keys(allDataFromStorage));
-            cache.merge(allDataFromStorage);
+            cache.hydrate(allDataFromStorage as Record<OnyxKey, OnyxValue<OnyxKey>>);
 
+            return allDataFromStorage;
+        });
+    }
+
+    return Storage.getAllKeys().then((keys) => {
+        const filteredKeys = keys.filter((key) => !OnyxKeys.isRamOnlyKey(key) && !isSkippableMemberKey(key));
+        cache.setAllKeys(filteredKeys);
+
+        const eagerKeys = filteredKeys.filter((key) => {
+            const collectionKey = OnyxKeys.getCollectionKey(key);
+            return !collectionKey || !cache.isLazyCollection(collectionKey);
+        });
+
+        if (eagerKeys.length === 0) {
+            return {};
+        }
+
+        return Storage.multiGet(eagerKeys).then((pairs) => {
+            const eagerData: Record<string, unknown> = {};
+            for (const [key, value] of pairs) {
+                eagerData[key] = value;
+            }
+            cache.hydrate(eagerData as Record<OnyxKey, OnyxValue<OnyxKey>>);
+            return eagerData;
+        });
+    });
+}
+
+function initializeWithDefaultKeyStates(): Promise<void> {
+    return loadInitialData()
+        .then((allDataFromStorage) => {
             // For keys that have a developer-defined default (via `initialKeyStates`), merge the
             // persisted value with the default so new properties added in code updates are applied
             // without wiping user data that already exists in storage.
@@ -1153,6 +1316,12 @@ function subscribeToKey<TKey extends OnyxKey>(connectOptions: ConnectOptions<TKe
 
                 const matchedKey = OnyxKeys.isCollectionKey(mapping.key) ? mapping.key : undefined;
 
+                // The key index is complete and authoritative, so a lazy collection with zero member
+                // keys is known-empty — mark it hydrated so reads report "empty" instead of "loading".
+                if (matchedKey && cache.isLazyCollection(matchedKey)) {
+                    cache.setHydrationState(matchedKey, 'hydrated');
+                }
+
                 // Here we cannot use batching because the nullish value is expected to be set immediately for default props
                 // or they will be undefined.
                 sendDataToConnection(mapping, matchedKey);
@@ -1163,6 +1332,13 @@ function subscribeToKey<TKey extends OnyxKey>(connectOptions: ConnectOptions<TKe
             // member values into a single object and makes one call with the whole collection object.
             if (typeof mapping.callback === 'function') {
                 if (OnyxKeys.isCollectionKey(mapping.key)) {
+                    // Lazy collections hydrate on first subscription. The hydration's completion
+                    // broadcast notifies this (already registered) subscriber; the extra
+                    // sendDataToConnection is deduped via lastConnectionCallbackData.
+                    if (cache.getHydrationState(mapping.key) !== 'hydrated') {
+                        hydrateCollection(mapping.key).then(() => sendDataToConnection(mapping, mapping.key));
+                        return;
+                    }
                     getCollectionDataAndSendAsObject(matchingKeys, mapping);
                     return;
                 }
@@ -1197,6 +1373,22 @@ function unsubscribeFromKey(subscriptionID: number): void {
 function updateSnapshots<TKey extends OnyxKey>(data: Array<OnyxUpdate<TKey>>, mergeFn: typeof Onyx.merge): Array<() => Promise<void>> {
     const snapshotCollectionKey = getSnapshotKey();
     if (!snapshotCollectionKey) return [];
+
+    // When the snapshot collection is lazy and not yet hydrated, iterating the cached collection
+    // would silently skip every snapshot and Search results would stop receiving updates. Hydrate
+    // first, then compute the updates. If hydration failed (state still not hydrated), give up for
+    // this batch rather than recursing forever.
+    if (cache.isLazyCollection(snapshotCollectionKey) && cache.getHydrationState(snapshotCollectionKey) !== 'hydrated') {
+        return [
+            () =>
+                hydrateCollection(snapshotCollectionKey).then(() => {
+                    if (cache.getHydrationState(snapshotCollectionKey) !== 'hydrated') {
+                        return undefined;
+                    }
+                    return Promise.all(updateSnapshots(data, mergeFn).map((thunk) => thunk())).then(() => undefined);
+                }),
+        ];
+    }
 
     const promises: Array<() => Promise<void>> = [];
 
@@ -1303,6 +1495,13 @@ function setWithRetry<TKey extends OnyxKey>({key, value, options}: SetParams<TKe
 
     // If the existing value as well as the new value are null, we can return early.
     if (existingValue === undefined && value === null) {
+        // Under lazy hydration a key can exist in storage without a cached value. The key index is
+        // complete and authoritative: if it lists the key (and it isn't known-nullish), a row exists
+        // on disk and MUST be deleted — skipping here would let a later hydration resurrect it.
+        if (cache.getAllKeys().has(key) && !cache.hasNullishStorageKey(key)) {
+            OnyxUtils.remove(key);
+            OnyxUtils.logKeyRemoved(OnyxUtils.METHOD.SET, key);
+        }
         return Promise.resolve();
     }
 
@@ -1845,6 +2044,8 @@ const OnyxUtils = {
     setWithRetry,
     multiSetWithRetry,
     setCollectionWithRetry,
+    hydrateCollection,
+    isAwaitingHydration,
 };
 
 export type {OnyxMethod};

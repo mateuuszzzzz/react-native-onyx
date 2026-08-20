@@ -1,4 +1,5 @@
 import type {Merge} from 'type-fest';
+
 import type OnyxUtils from './OnyxUtils';
 import type {OnyxMethod} from './OnyxUtils';
 import type {FastMergeReplaceNullPatch} from './utils';
@@ -401,6 +402,17 @@ type InitOptions = {
      * without hardcoding app-specific logic inside Onyx.
      */
     snapshotMergeKeys?: string[];
+
+    /**
+     * Collection keys (e.g. `ONYXKEYS.COLLECTION.REPORT_ACTIONS`) whose member VALUES are not loaded
+     * during init — only their keys are indexed. A lazy collection is hydrated in full on the first
+     * subscription to its collection root (or explicitly via `Onyx.hydrate()`); subscriptions to
+     * individual members load just that member. While a lazy collection is hydrating, `useOnyx`
+     * reports `status: 'loading'` and collection-root subscribers receive no callbacks — the first
+     * callback always carries the complete collection.
+     * @default []
+     */
+    lazyCollections?: OnyxKey[];
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

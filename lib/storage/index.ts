@@ -1,9 +1,10 @@
-import * as Logger from '../Logger';
-
-import PlatformStorage from './platforms';
-import InstanceSync from './InstanceSync';
-import MemoryOnlyProvider from './providers/MemoryOnlyProvider';
+import type {OnyxKey} from '../types';
 import type StorageProvider from './providers/types';
+
+import * as Logger from '../Logger';
+import InstanceSync from './InstanceSync';
+import PlatformStorage from './platforms';
+import MemoryOnlyProvider from './providers/MemoryOnlyProvider';
 
 let provider = PlatformStorage as StorageProvider<unknown>;
 let shouldKeepInstancesSync = false;
@@ -14,7 +15,9 @@ const initPromise = new Promise((resolve) => {
 
 type Storage = {
     getStorageProvider: () => StorageProvider<unknown>;
-} & Omit<StorageProvider<unknown>, 'name' | 'store'>;
+    /** Always present on the facade (native implementation or getAllKeys+multiGet fallback), unlike providers where it's optional. */
+    getByPrefix: NonNullable<StorageProvider<unknown>['getByPrefix']>;
+} & Omit<StorageProvider<unknown>, 'name' | 'store' | 'getByPrefix'>;
 
 /**
  * Degrade performance by removing the storage provider and only using cache
@@ -181,6 +184,25 @@ const storage: Storage = {
      * Returns all key-value pairs from storage in a single batch operation
      */
     getAll: () => tryOrDegradePerformance(() => provider.getAll()),
+
+    /**
+     * Gets all key-value pairs whose key starts with the given prefix (one lazy-collection
+     * hydration read). Falls back to getAllKeys + multiGet for providers without a native
+     * prefix-range implementation.
+     */
+    getByPrefix: (prefix: OnyxKey) =>
+        tryOrDegradePerformance(() => {
+            if (provider.getByPrefix) {
+                return provider.getByPrefix(prefix);
+            }
+            return provider.getAllKeys().then((keys) => {
+                const matchingKeys = keys.filter((key) => key.startsWith(prefix));
+                if (matchingKeys.length === 0) {
+                    return [];
+                }
+                return provider.multiGet(matchingKeys);
+            });
+        }),
 
     /**
      * Gets the total bytes of the store

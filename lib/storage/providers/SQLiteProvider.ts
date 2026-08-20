@@ -3,12 +3,15 @@
  * converting the value to a JSON string
  */
 import type {BatchQueryCommand, NitroSQLiteConnection, QueryResult} from 'react-native-nitro-sqlite';
-import {open} from 'react-native-nitro-sqlite';
+
 import {getFreeDiskStorage} from 'react-native-device-info';
+import {open} from 'react-native-nitro-sqlite';
+
 import type {FastMergeReplaceNullPatch} from '../../utils';
-import utils from '../../utils';
 import type StorageProvider from './types';
 import type {StorageKeyList, StorageKeyValuePair} from './types';
+
+import utils from '../../utils';
 import classifySQLiteError from './classifySQLiteError';
 
 /**
@@ -270,6 +273,31 @@ const provider: StorageProvider<NitroSQLiteConnection | undefined> = {
         // once, instead of returning every row and parsing each one individually in JavaScript.
         return provider.store
             .executeAsync<{aggregated: string | null}>('SELECT json_group_array(json_array(record_key, json(valueJSON))) AS aggregated FROM keyvaluepairs;')
+            .then(({rows}) => {
+                const aggregated = rows?.item(0)?.aggregated;
+                if (aggregated == null) {
+                    return [];
+                }
+                return JSON.parse(aggregated) as StorageKeyValuePair[];
+            });
+    },
+    getByPrefix(prefix) {
+        if (!provider.store) {
+            throw new Error('Store is not initialized!');
+        }
+
+        // Half-open key range instead of LIKE: the table is WITHOUT ROWID with record_key as its
+        // primary key, so `>= prefix AND < upperBound` is a pure B-tree range scan (LIKE defeats the
+        // index under the default case-insensitive collation). The upper bound is the prefix with its
+        // last code unit incremented — every key starting with the prefix sorts inside the range.
+        const upperBound = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+
+        // Same single-JSON.parse aggregation as getAll — one parse per hydration, not one per row.
+        return provider.store
+            .executeAsync<{aggregated: string | null}>(
+                'SELECT json_group_array(json_array(record_key, json(valueJSON))) AS aggregated FROM keyvaluepairs WHERE record_key >= ? AND record_key < ?;',
+                [prefix, upperBound],
+            )
             .then(({rows}) => {
                 const aggregated = rows?.item(0)?.aggregated;
                 if (aggregated == null) {

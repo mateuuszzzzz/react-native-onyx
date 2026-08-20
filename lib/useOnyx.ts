@@ -1,12 +1,14 @@
 import {useCallback, useEffect, useMemo, useRef, useSyncExternalStore} from 'react';
-import createMemoizedSelector from './createMemoizedSelector';
-import OnyxCache, {TASK} from './OnyxCache';
+
 import type {Connection} from './OnyxConnectionManager';
-import connectionManager from './OnyxConnectionManager';
-import OnyxUtils from './OnyxUtils';
 import type {CollectionKeyBase, OnyxKey, OnyxValue} from './types';
-import onyxSnapshotCache from './OnyxSnapshotCache';
+
+import createMemoizedSelector from './createMemoizedSelector';
 import memoizedShallowEqual from './memoizedShallowEqual';
+import OnyxCache, {TASK} from './OnyxCache';
+import connectionManager from './OnyxConnectionManager';
+import onyxSnapshotCache from './OnyxSnapshotCache';
+import OnyxUtils from './OnyxUtils';
 
 type UseOnyxSelector<TKey extends OnyxKey, TReturnValue = OnyxValue<TKey>> = (data: OnyxValue<TKey> | undefined) => TReturnValue;
 
@@ -134,9 +136,12 @@ function useOnyx<TKey extends OnyxKey, TReturnValue = OnyxValue<TKey>>(key: TKey
         // Since the fetch status can be different given the use cases below, we define the variable right away.
         let newFetchStatus: FetchStatus | undefined;
 
-        // If we have pending merge operations for the key during the first connection, we set the new value to `undefined`
-        // and fetch status to `loading` to simulate that it is still being loaded until we have the most updated data.
-        if (isFirstConnection && OnyxUtils.hasPendingMergeForKey(key)) {
+        // If we have pending merge operations for the key during the first connection, or the key is
+        // a lazy collection that hasn't finished hydrating from storage yet, we set the new value to
+        // `undefined` and fetch status to `loading` to simulate that it is still being loaded until
+        // we have the most updated data. The hydration-completion broadcast fires the connection
+        // callback, which flips `isFirstConnection` and transitions the hook to `loaded`.
+        if (isFirstConnection && (OnyxUtils.hasPendingMergeForKey(key) || OnyxUtils.isAwaitingHydration(key))) {
             newValueRef.current = undefined;
             newFetchStatus = 'loading';
         }

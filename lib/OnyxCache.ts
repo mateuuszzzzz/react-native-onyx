@@ -1,9 +1,12 @@
+import type {ValueOf} from 'type-fest';
+
 import {deepEqual} from 'fast-equals';
 import bindAll from 'lodash/bindAll';
-import type {ValueOf} from 'type-fest';
-import utils from './utils';
+
 import type {CollectionKeyBase, KeyValueMapping, NonUndefined, OnyxCollection, OnyxKey, OnyxValue} from './types';
+
 import OnyxKeys from './OnyxKeys';
+import utils from './utils';
 
 /** Frozen object containing all collection members — safe to return by reference */
 type CollectionSnapshot = Readonly<NonUndefined<OnyxCollection<KeyValueMapping[OnyxKey]>>>;
@@ -20,9 +23,19 @@ const TASK = {
     GET: 'get',
     GET_ALL_KEYS: 'getAllKeys',
     CLEAR: 'clear',
+    HYDRATE: 'hydrate',
 } as const;
 
 type CacheTask = ValueOf<typeof TASK> | `${ValueOf<typeof TASK>}:${string}`;
+
+/**
+ * Hydration lifecycle of a lazy collection.
+ * - `unhydrated`: member values are not loaded into cache (only their keys are indexed).
+ * - `hydrating`: a storage read for the whole collection is in flight (joinable via TASK.HYDRATE).
+ * - `hydrated`: all member values are resident in cache; collection reads are complete and safe.
+ * Non-lazy collections are always `hydrated`.
+ */
+type HydrationState = 'unhydrated' | 'hydrating' | 'hydrated';
 
 /**
  * In memory cache providing data by reference
@@ -55,6 +68,12 @@ class OnyxCache {
 
     /** Collections whose snapshots need rebuilding (lazy — rebuilt on next read) */
     private dirtyCollections: Set<CollectionKeyBase>;
+
+    /** Collection keys configured (via Onyx.init lazyCollections) to hydrate on demand instead of at init */
+    private lazyCollections = new Set<OnyxKey>();
+
+    /** Hydration lifecycle per lazy collection. Absence means `unhydrated` for lazy collections, `hydrated` for the rest. */
+    private hydrationStates = new Map<OnyxKey, HydrationState>();
 
     constructor() {
         this.storageKeys = new Set();
@@ -90,6 +109,13 @@ class OnyxCache {
             'setCollectionKeys',
             'hasValueChanged',
             'getCollectionData',
+            'hydrate',
+            'setLazyCollections',
+            'isLazyCollection',
+            'hasLazyCollections',
+            'getHydrationState',
+            'setHydrationState',
+            'resetLazyHydrationStates',
         );
     }
 
@@ -256,6 +282,72 @@ class OnyxCache {
         for (const collectionKey of affectedCollections) {
             this.dirtyCollections.add(collectionKey);
         }
+    }
+
+    /**
+     * Populates the cache with freshly-read storage values by direct assignment, without the deep
+     * merge `merge()` performs. Storage is the source of truth for these values and nothing exists
+     * in cache for them yet (init load / collection hydration), so re-allocating the whole object
+     * graph via fastMerge would only double peak memory. Values already present in cache win —
+     * they are newer than storage (cache-first writes).
+     */
+    hydrate(data: Record<OnyxKey, OnyxValue<OnyxKey>>): void {
+        for (const [key, value] of Object.entries(data)) {
+            this.addKey(key);
+
+            if (value === null || value === undefined) {
+                this.addNullishStorageKey(key);
+                continue;
+            }
+
+            // A cached value is newer than what storage holds (writes land in cache first) — never overwrite it.
+            if (this.storageMap[key] !== undefined) {
+                continue;
+            }
+
+            this.nullishStorageKeys.delete(key);
+            this.storageMap[key] = value;
+
+            const collectionKey = OnyxKeys.getCollectionKey(key);
+            if (collectionKey) {
+                this.dirtyCollections.add(collectionKey);
+            }
+        }
+    }
+
+    /** Configures which collection keys hydrate on demand instead of during init. */
+    setLazyCollections(lazyCollections: Set<OnyxKey>): void {
+        this.lazyCollections = lazyCollections;
+    }
+
+    /** Whether the given collection key is configured for on-demand hydration. */
+    isLazyCollection(collectionKey: OnyxKey): boolean {
+        return this.lazyCollections.has(collectionKey);
+    }
+
+    /** Whether any collection is configured for on-demand hydration (i.e. lazy init is active). */
+    hasLazyCollections(): boolean {
+        return this.lazyCollections.size > 0;
+    }
+
+    /** Hydration lifecycle state for a collection key. Non-lazy collections are always `hydrated`. */
+    getHydrationState(collectionKey: OnyxKey): HydrationState {
+        if (!this.lazyCollections.has(collectionKey)) {
+            return 'hydrated';
+        }
+        return this.hydrationStates.get(collectionKey) ?? 'unhydrated';
+    }
+
+    setHydrationState(collectionKey: OnyxKey, state: HydrationState): void {
+        this.hydrationStates.set(collectionKey, state);
+    }
+
+    /**
+     * Forgets all hydration progress (used by Onyx.clear) — every lazy collection becomes
+     * `unhydrated` and will re-read from (the now cleared) storage on its next subscription.
+     */
+    resetLazyHydrationStates(): void {
+        this.hydrationStates = new Map();
     }
 
     /**
@@ -470,6 +562,14 @@ class OnyxCache {
      * Lazily rebuilds the snapshot if the collection was modified since the last read.
      */
     getCollectionData(collectionKey: OnyxKey): Record<OnyxKey, OnyxValue<OnyxKey>> | undefined {
+        // A lazy collection that hasn't fully hydrated has no complete answer to give. Returning
+        // undefined (the "unknown" signal) here is what keeps every downstream consumer — including
+        // keysChanged broadcasts triggered by writes to individual members — from presenting a
+        // partial set of warm members as the whole collection.
+        if (this.getHydrationState(collectionKey) !== 'hydrated') {
+            return undefined;
+        }
+
         if (this.dirtyCollections.has(collectionKey)) {
             this.rebuildCollectionSnapshot(collectionKey);
             this.dirtyCollections.delete(collectionKey);
@@ -499,4 +599,4 @@ const instance = new OnyxCache();
 
 export default instance;
 export {TASK};
-export type {CacheTask};
+export type {CacheTask, HydrationState};

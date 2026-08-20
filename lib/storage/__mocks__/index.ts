@@ -1,7 +1,7 @@
-import MemoryOnlyProvider, {mockStore, setMockStore} from '../providers/MemoryOnlyProvider';
-import classifyIDBError from '../providers/IDBKeyValProvider/classifyError';
-import classifySQLiteError from '../providers/classifySQLiteError';
 import {StorageErrorClass} from '../errors';
+import classifySQLiteError from '../providers/classifySQLiteError';
+import classifyIDBError from '../providers/IDBKeyValProvider/classifyError';
+import MemoryOnlyProvider, {mockStore, setMockStore} from '../providers/MemoryOnlyProvider';
 
 const init = jest.fn(MemoryOnlyProvider.init);
 
@@ -30,6 +30,16 @@ const StorageMock = {
     clear: jest.fn(MemoryOnlyProvider.clear),
     getAllKeys: jest.fn(MemoryOnlyProvider.getAllKeys),
     getAll: jest.fn(MemoryOnlyProvider.getAll),
+    // MemoryOnlyProvider has no native prefix-range read — mirror the real facade's fallback.
+    getByPrefix: jest.fn((prefix: string) =>
+        MemoryOnlyProvider.getAllKeys().then((keys) => {
+            const matchingKeys = keys.filter((key) => key.startsWith(prefix));
+            if (matchingKeys.length === 0) {
+                return [];
+            }
+            return MemoryOnlyProvider.multiGet(matchingKeys);
+        }),
+    ),
     getDatabaseSize: jest.fn(MemoryOnlyProvider.getDatabaseSize),
     keepInstancesSync: jest.fn(),
 

@@ -1,8 +1,5 @@
-import * as Logger from './Logger';
-import cache, {TASK} from './OnyxCache';
-import Storage from './storage';
-import utils from './utils';
-import DevTools, {initDevTools} from './DevTools';
+import type {HydrationState} from './OnyxCache';
+import type {Connection} from './OnyxConnectionManager';
 import type {
     CollectionKeyBase,
     ConnectOptions,
@@ -22,12 +19,17 @@ import type {
     OnyxMethodMap,
     SetOptions,
 } from './types';
-import OnyxUtils from './OnyxUtils';
-import OnyxKeys from './OnyxKeys';
+
+import DevTools, {initDevTools} from './DevTools';
+import * as Logger from './Logger';
 import logMessages from './logMessages';
-import type {Connection} from './OnyxConnectionManager';
+import cache, {TASK} from './OnyxCache';
 import connectionManager from './OnyxConnectionManager';
+import OnyxKeys from './OnyxKeys';
 import OnyxMerge from './OnyxMerge';
+import OnyxUtils from './OnyxUtils';
+import Storage from './storage';
+import utils from './utils';
 
 /** Initialize the store with actions and listening for storage events */
 function init({
@@ -39,6 +41,7 @@ function init({
     skippableCollectionMemberIDs = [],
     ramOnlyKeys = [],
     snapshotMergeKeys = [],
+    lazyCollections = [],
 }: InitOptions): void {
     initDevTools(enableDevTools);
 
@@ -48,6 +51,10 @@ function init({
     OnyxUtils.setSnapshotMergeKeys(new Set(snapshotMergeKeys));
 
     OnyxKeys.setRamOnlyKeys(new Set<OnyxKey>(ramOnlyKeys));
+
+    // Must be configured before initStoreValues/initializeWithDefaultKeyStates — both the empty-
+    // snapshot seeding and the initial data load consult the lazy set.
+    cache.setLazyCollections(new Set<OnyxKey>(lazyCollections));
 
     if (shouldSyncMultipleInstances) {
         Storage.keepInstancesSync?.((key, value) => {
@@ -314,6 +321,10 @@ function clear(keysToPreserve: OnyxKey[] = []): Promise<void> {
         const promise = OnyxUtils.getAllKeys()
             .then((cachedKeys) => {
                 cache.clearNullishStorageKeys();
+                // Every non-preserved lazy collection is about to be wiped — forget hydration
+                // progress so post-clear subscriptions re-read from the cleared storage. An
+                // in-flight hydration checks TASK.CLEAR before merging, so it cannot resurrect rows.
+                cache.resetLazyHydrationStates();
 
                 const keysToBeClearedFromStorage: OnyxKey[] = [];
                 const keyValuesToResetIndividually: KeyValueMapping = {};
@@ -570,6 +581,20 @@ function setCollection<TKey extends CollectionKeyBase>(collectionKey: TKey, coll
     return OnyxUtils.afterInit(() => OnyxUtils.setCollectionWithRetry({collectionKey, collection}));
 }
 
+/**
+ * Loads all members of a lazy collection into cache and notifies subscribers. Resolves immediately
+ * when the collection is already hydrated, is not configured as lazy, or is not a collection key;
+ * joins the in-flight read when hydration is already running.
+ */
+function hydrate(collectionKey: OnyxKey): Promise<void> {
+    return OnyxUtils.afterInit(() => OnyxUtils.hydrateCollection(collectionKey));
+}
+
+/** Hydration lifecycle state of a collection key — `hydrated` for any non-lazy key. */
+function getHydrationStatus(collectionKey: OnyxKey): HydrationState {
+    return cache.getHydrationState(collectionKey);
+}
+
 const Onyx = {
     METHOD: OnyxUtils.METHOD,
     connect,
@@ -583,6 +608,8 @@ const Onyx = {
     update,
     clear,
     init,
+    hydrate,
+    getHydrationStatus,
     registerLogger: Logger.registerLogger,
 };
 
