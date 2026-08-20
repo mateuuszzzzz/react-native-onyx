@@ -842,10 +842,15 @@ function hydrateCollection(collectionKey: OnyxKey): Promise<void> {
     const promise = Storage.getByPrefix(collectionKey)
         .then((pairs) => {
             // A clear() started while we were reading — these rows are being deleted; merging them
-            // would resurrect the previous user's data. Stay unhydrated; post-clear subscriptions
-            // will re-trigger hydration against the cleared storage.
+            // would resurrect the previous user's data. Discard this read and re-run the hydration
+            // once the clear settles (fire-and-forget, after our own task entry frees), so
+            // subscribers converge on the cleared storage instead of sitting unhydrated forever.
             if (cache.hasPendingTask(TASK.CLEAR)) {
                 cache.setHydrationState(collectionKey, 'unhydrated');
+                const clearTaskPromise = cache.getTaskPromise(TASK.CLEAR) ?? Promise.resolve();
+                clearTaskPromise.finally(() => {
+                    queueMicrotask(() => hydrateCollection(collectionKey));
+                });
                 return;
             }
 
@@ -894,6 +899,25 @@ function onFirstSubscription(key: OnyxKey, callback: () => void): () => void {
     }
     firstSubscriptionTriggers.set(key, callback);
     return () => firstSubscriptionTriggers.delete(key);
+}
+
+/**
+ * Re-hydrates every lazy collection that has live collection-root subscribers. Called after
+ * `Onyx.clear()` resets the hydration states: existing subscribers don't re-subscribe (only new
+ * connections do), so without this they would sit on an `unhydrated` collection — reporting
+ * "loading" and receiving no broadcasts — until some unrelated write happened to touch it.
+ * Post-clear storage holds only defaults, so these hydrations are cheap (usually hydrated-empty).
+ */
+function rehydrateSubscribedLazyCollections(): void {
+    for (const [key, subscriptionIDs] of onyxKeyToSubscriptionIDs.entries()) {
+        if (!subscriptionIDs || (subscriptionIDs as number[]).length === 0) {
+            continue;
+        }
+        if (!OnyxKeys.isCollectionKey(key as OnyxKey) || !cache.isLazyCollection(key as OnyxKey)) {
+            continue;
+        }
+        hydrateCollection(key as OnyxKey);
+    }
 }
 
 /** Whether reads of this key should present as "loading": a lazy collection that hasn't finished hydrating. */
@@ -2090,6 +2114,7 @@ const OnyxUtils = {
     setCollectionWithRetry,
     hydrateCollection,
     onFirstSubscription,
+    rehydrateSubscribedLazyCollections,
     isAwaitingHydration,
 };
 

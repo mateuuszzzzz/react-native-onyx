@@ -1,5 +1,6 @@
 import type {HydrationState} from './OnyxCache';
 import type {Connection} from './OnyxConnectionManager';
+import type {ReconcileIndexesResult} from './OnyxIndexes';
 import type {
     CollectionKeyBase,
     ConnectOptions,
@@ -24,9 +25,8 @@ import DevTools, {initDevTools} from './DevTools';
 import * as Logger from './Logger';
 import logMessages from './logMessages';
 import cache, {TASK} from './OnyxCache';
-import {reconcileIndexes as reconcileIndexesInternal, setIndexesConfig} from './OnyxIndexes';
-import type {ReconcileIndexesResult} from './OnyxIndexes';
 import connectionManager from './OnyxConnectionManager';
+import {reconcileIndexes as reconcileIndexesInternal, setIndexesConfig} from './OnyxIndexes';
 import OnyxKeys from './OnyxKeys';
 import OnyxMerge from './OnyxMerge';
 import OnyxUtils from './OnyxUtils';
@@ -413,7 +413,15 @@ function clear(keysToPreserve: OnyxKey[] = []): Promise<void> {
                         }
                     });
             })
-            .then(() => undefined);
+            .then(() => {
+                // Hydration states were reset above, but existing subscribers don't re-subscribe —
+                // re-hydrate the lazy collections they watch so they converge on the cleared state
+                // instead of waiting for an unrelated write. Runs after the CLEAR task would resolve
+                // is not possible (captureTask wraps this promise), so it runs as the final step;
+                // hydrateCollection's own clear-race guard is a no-op here since the clear finished
+                // its storage work already.
+                OnyxUtils.rehydrateSubscribedLazyCollections();
+            });
 
         return cache.captureTask(TASK.CLEAR, promise) as Promise<void>;
     });

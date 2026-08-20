@@ -2,6 +2,8 @@ import {act, renderHook} from '@testing-library/react-native';
 
 import type {StorageKeyValuePair} from '../../lib/storage/providers/types';
 
+import type {Connection} from '../../lib/OnyxConnectionManager';
+
 import Onyx, {useOnyx} from '../../lib';
 import OnyxCache from '../../lib/OnyxCache';
 import OnyxUtils from '../../lib/OnyxUtils';
@@ -26,8 +28,16 @@ const SEEDED_MEMBERS = {
  * Invariant tests for lazy collection hydration (`InitOptions.lazyCollections`).
  * Each test simulates a second app session: data is written straight to storage first
  * (a previous session's persistence), then Onyx.init runs with `test_` configured lazy.
+ *
+ * Subscriptions are tracked and disconnected after each test: post-clear rehydration serves LIVE
+ * subscribers, so a leaked subscription from one test would re-hydrate collections for the next.
  */
 describe('Lazy collections', () => {
+    const connections: Connection[] = [];
+    const trackConnection = (connection: Connection) => {
+        connections.push(connection);
+        return connection;
+    };
     beforeEach(async () => {
         for (const [key, value] of Object.entries(SEEDED_MEMBERS)) {
             await StorageMock.setItem(key, value);
@@ -42,6 +52,9 @@ describe('Lazy collections', () => {
     });
 
     afterEach(async () => {
+        for (const connection of connections.splice(0)) {
+            Onyx.disconnect(connection);
+        }
         await Onyx.clear();
         await waitForPromisesToResolve();
     });
@@ -61,7 +74,7 @@ describe('Lazy collections', () => {
 
     it('hydrates on first collection-root subscription and delivers the full collection in the first callback', async () => {
         const callback = jest.fn();
-        Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback});
+        trackConnection(Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback}));
         await waitForPromisesToResolve();
 
         // Invariant 2: the first callback carries the complete collection — never a partial one.
@@ -72,7 +85,7 @@ describe('Lazy collections', () => {
 
     it('loads only the requested member on a member-key subscription', async () => {
         const callback = jest.fn();
-        Onyx.connectWithoutView({key: `${ONYX_KEYS.COLLECTION.TEST_KEY}1`, callback});
+        trackConnection(Onyx.connectWithoutView({key: `${ONYX_KEYS.COLLECTION.TEST_KEY}1`, callback}));
         await waitForPromisesToResolve();
 
         // Invariant 6 / decision D3: a member subscription hydrates just that member.
@@ -108,8 +121,8 @@ describe('Lazy collections', () => {
         const getByPrefixSpy = StorageMock.getByPrefix as jest.Mock;
         getByPrefixSpy.mockClear();
 
-        Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback: jest.fn()});
-        Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback: jest.fn()});
+        trackConnection(Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback: jest.fn()}));
+        trackConnection(Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback: jest.fn()}));
         await waitForPromisesToResolve();
 
         const testKeyReads = getByPrefixSpy.mock.calls.filter((call) => call.at(0) === ONYX_KEYS.COLLECTION.TEST_KEY);
@@ -126,7 +139,7 @@ describe('Lazy collections', () => {
         getByPrefixSpy.mockImplementationOnce(() => heldRead);
 
         const callback = jest.fn();
-        Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback});
+        trackConnection(Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback}));
         await waitForPromisesToResolve();
         expect(Onyx.getHydrationStatus(ONYX_KEYS.COLLECTION.TEST_KEY)).toBe('hydrating');
 
@@ -149,7 +162,7 @@ describe('Lazy collections', () => {
 
     it('reports an empty lazy collection as hydrated-empty, not loading', async () => {
         const callback = jest.fn();
-        Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.PEOPLE, callback});
+        trackConnection(Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.PEOPLE, callback}));
         await waitForPromisesToResolve();
 
         expect(callback).toHaveBeenCalledWith(undefined, ONYX_KEYS.COLLECTION.PEOPLE);
@@ -176,7 +189,7 @@ describe('Lazy collections', () => {
         const getByPrefixSpy = StorageMock.getByPrefix as jest.Mock;
         getByPrefixSpy.mockImplementationOnce(() => heldRead);
 
-        Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback: jest.fn()});
+        trackConnection(Onyx.connectWithoutView({key: ONYX_KEYS.COLLECTION.TEST_KEY, callback: jest.fn()}));
         await waitForPromisesToResolve();
 
         const clearPromise = Onyx.clear();
@@ -184,9 +197,13 @@ describe('Lazy collections', () => {
         await clearPromise;
         await waitForPromisesToResolve();
 
-        // The previous session's rows must not have been merged back into cache by the stale read.
+        // The previous session's rows must not have been merged back into cache by the stale read...
         expect(OnyxCache.get(`${ONYX_KEYS.COLLECTION.TEST_KEY}1`)).toBeUndefined();
-        expect(Onyx.getHydrationStatus(ONYX_KEYS.COLLECTION.TEST_KEY)).toBe('unhydrated');
+        // ...and because a live subscriber exists, the post-clear rehydration converges the
+        // collection to hydrated-EMPTY (reading the cleared storage) instead of leaving it stranded.
+        await waitForPromisesToResolve();
+        expect(Onyx.getHydrationStatus(ONYX_KEYS.COLLECTION.TEST_KEY)).toBe('hydrated');
+        expect(OnyxCache.get(`${ONYX_KEYS.COLLECTION.TEST_KEY}1`)).toBeUndefined();
     });
 });
 
