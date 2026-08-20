@@ -4,6 +4,7 @@ import type {StorageKeyValuePair} from '../../lib/storage/providers/types';
 
 import Onyx, {useOnyx} from '../../lib';
 import OnyxCache from '../../lib/OnyxCache';
+import OnyxUtils from '../../lib/OnyxUtils';
 import StorageMock from '../../lib/storage';
 import waitForPromisesToResolve from '../utils/waitForPromisesToResolve';
 
@@ -186,5 +187,38 @@ describe('Lazy collections', () => {
         // The previous session's rows must not have been merged back into cache by the stale read.
         expect(OnyxCache.get(`${ONYX_KEYS.COLLECTION.TEST_KEY}1`)).toBeUndefined();
         expect(Onyx.getHydrationStatus(ONYX_KEYS.COLLECTION.TEST_KEY)).toBe('unhydrated');
+    });
+});
+
+describe('OnyxUtils.onFirstSubscription', () => {
+    beforeEach(async () => {
+        Onyx.init({keys: ONYX_KEYS});
+        await waitForPromisesToResolve();
+    });
+
+    afterEach(async () => {
+        await Onyx.clear();
+        await waitForPromisesToResolve();
+    });
+
+    it('fires once on the first subscription to the key and never again', async () => {
+        const trigger = jest.fn();
+        OnyxUtils.onFirstSubscription(ONYX_KEYS.SINGLE_KEY, trigger);
+        expect(trigger).not.toHaveBeenCalled();
+
+        Onyx.connectWithoutView({key: ONYX_KEYS.SINGLE_KEY, callback: jest.fn()});
+        expect(trigger).toHaveBeenCalledTimes(1);
+
+        Onyx.connectWithoutView({key: ONYX_KEYS.SINGLE_KEY, callback: jest.fn()});
+        expect(trigger).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires immediately when the key already has subscribers', async () => {
+        Onyx.connectWithoutView({key: ONYX_KEYS.SINGLE_KEY, callback: jest.fn()});
+        await waitForPromisesToResolve();
+
+        const trigger = jest.fn();
+        OnyxUtils.onFirstSubscription(ONYX_KEYS.SINGLE_KEY, trigger);
+        expect(trigger).toHaveBeenCalledTimes(1);
     });
 });

@@ -877,6 +877,25 @@ function hydrateCollection(collectionKey: OnyxKey): Promise<void> {
     return cache.captureTask(taskName, promise) as Promise<void>;
 }
 
+/** One-shot callbacks fired the first time a given key gets ANY subscription (useOnyx or connect). */
+const firstSubscriptionTriggers = new Map<OnyxKey, () => void>();
+
+/**
+ * Registers a one-shot callback invoked the first time the given key is subscribed to. If the key
+ * already has subscribers, the callback fires immediately. Used to start producers lazily — e.g. a
+ * derived-value config whose engine should only spin up once something reads its output key.
+ * Returns an unregister function (no-op after firing).
+ */
+function onFirstSubscription(key: OnyxKey, callback: () => void): () => void {
+    const existingSubscriptionIDs = onyxKeyToSubscriptionIDs.get(key);
+    if (existingSubscriptionIDs && existingSubscriptionIDs.length > 0) {
+        callback();
+        return () => {};
+    }
+    firstSubscriptionTriggers.set(key, callback);
+    return () => firstSubscriptionTriggers.delete(key);
+}
+
 /** Whether reads of this key should present as "loading": a lazy collection that hasn't finished hydrating. */
 function isAwaitingHydration(key: OnyxKey): boolean {
     if (!OnyxKeys.isCollectionKey(key)) {
@@ -1284,6 +1303,18 @@ function subscribeToKey<TKey extends OnyxKey>(connectOptions: ConnectOptions<TKe
     // to avoid having to loop through all the Subscribers all the time (even when just one connection belongs to one key),
     // We create a mapping from key to lists of subscriptionIDs to access the specific list of subscriptionIDs.
     storeKeyBySubscriptions(mapping.key, callbackToStateMapping[subscriptionID].subscriptionID);
+
+    // Fire any registered first-subscription trigger for this key (used to lazily start producers —
+    // e.g. a derived-value engine that should only spin up once something actually reads its output).
+    const firstSubscriptionTrigger = firstSubscriptionTriggers.get(mapping.key);
+    if (firstSubscriptionTrigger) {
+        firstSubscriptionTriggers.delete(mapping.key);
+        try {
+            firstSubscriptionTrigger();
+        } catch (error) {
+            Logger.logAlert(`[OnyxUtils.subscribeToKey] onFirstSubscription trigger threw for key '${mapping.key}': ${error}`);
+        }
+    }
 
     // Commit connection only after init passes
     deferredInitTask.promise
@@ -2058,6 +2089,7 @@ const OnyxUtils = {
     multiSetWithRetry,
     setCollectionWithRetry,
     hydrateCollection,
+    onFirstSubscription,
     isAwaitingHydration,
 };
 
