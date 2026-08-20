@@ -413,6 +413,17 @@ type InitOptions = {
      * @default []
      */
     lazyCollections?: OnyxKey[];
+
+    /**
+     * Declarative storage indexes accelerating `Onyx.queryCollection` — a map of collection key to
+     * the member fields to index (e.g. `{[ONYXKEYS.COLLECTION.TRANSACTION]: ['reportID']}`).
+     * Declarations alone change nothing: call `Onyx.reconcileIndexes()` (ideally from idle after
+     * startup) to apply them — it creates declared-but-missing indexes and DROPS Onyx-managed
+     * indexes that are no longer declared in code. Provider-specific (SQLite today); elsewhere
+     * queries run unindexed with identical results.
+     * @default {}
+     */
+    indexes?: Record<OnyxKey, string[]>;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

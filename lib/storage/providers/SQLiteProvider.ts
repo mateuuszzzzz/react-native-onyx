@@ -21,6 +21,14 @@ type CompileOptionsResult = {
     compile_options: string;
 };
 
+/** Escapes a string for embedding as a single-quoted SQLite literal. */
+function escapeSQLiteStringLiteral(value: string): string {
+    return value.replace(/'/g, "''");
+}
+
+/** Namespace prefix of every index Onyx manages — reconciliation only ever touches these. */
+const ONYX_INDEX_PREFIX = 'onyx_idx_';
+
 /**
  * The type of the key-value pair stored in the SQLite database
  * @property record_key - the key of the record
@@ -329,9 +337,13 @@ const provider: StorageProvider<NitroSQLiteConnection | undefined> = {
             return Promise.reject(new Error('queryByPrefix(): null-sort cursors are not supported natively.'));
         }
 
+        // The key-range bounds are inlined as escaped literals instead of bound parameters ON
+        // PURPOSE: SQLite only plans a PARTIAL index (our per-collection indexes carry the same
+        // range in their WHERE clause) when it can prove the query's constraints imply the index's
+        // at prepare time — which it cannot do through parameters.
         const upperBound = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
-        const clauses: string[] = ['record_key >= ?', 'record_key < ?'];
-        const params: Array<string | number | boolean | null> = [prefix, upperBound];
+        const clauses: string[] = [`record_key >= '${escapeSQLiteStringLiteral(prefix)}'`, `record_key < '${escapeSQLiteStringLiteral(upperBound)}'`];
+        const params: Array<string | number | boolean | null> = [];
 
         for (const condition of query.where ?? []) {
             const expression = fieldExpression(condition.field);
@@ -396,6 +408,50 @@ const provider: StorageProvider<NitroSQLiteConnection | undefined> = {
             }
             return JSON.parse(aggregated) as StorageKeyValuePair[];
         });
+    },
+    listOnyxIndexes() {
+        if (!provider.store) {
+            throw new Error('Store is not initialized!');
+        }
+        return provider.store.executeAsync<{name: string}>(`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '${ONYX_INDEX_PREFIX}%';`).then(({rows}) => {
+            const names: string[] = [];
+            for (let index = 0; index < (rows?.length ?? 0); index++) {
+                const name = rows?.item(index)?.name;
+                if (name) {
+                    names.push(name);
+                }
+            }
+            return names;
+        });
+    },
+    createCollectionIndex(indexName, collectionPrefix, field) {
+        if (!provider.store) {
+            throw new Error('Store is not initialized!');
+        }
+        if (!indexName.startsWith(ONYX_INDEX_PREFIX) || !/^[A-Za-z0-9_]+$/.test(indexName)) {
+            return Promise.reject(new Error(`createCollectionIndex(): invalid index name '${indexName}'.`));
+        }
+        if (!/^[A-Za-z0-9_]+$/.test(field)) {
+            return Promise.reject(new Error(`createCollectionIndex(): invalid field name '${field}'.`));
+        }
+
+        // A PARTIAL expression index scoped to the collection's key range. The range literals here
+        // must textually imply the (also literal) range in queryByPrefix, and the indexed expression
+        // must textually match the query's — both are generated from the same inputs, so they do.
+        const upperBound = collectionPrefix.slice(0, -1) + String.fromCharCode(collectionPrefix.charCodeAt(collectionPrefix.length - 1) + 1);
+        const command = `CREATE INDEX IF NOT EXISTS ${indexName}
+            ON keyvaluepairs (json_extract(valueJSON, '$.${field}'))
+            WHERE record_key >= '${escapeSQLiteStringLiteral(collectionPrefix)}' AND record_key < '${escapeSQLiteStringLiteral(upperBound)}';`;
+        return provider.store.executeAsync(command).then(() => undefined);
+    },
+    dropIndex(indexName) {
+        if (!provider.store) {
+            throw new Error('Store is not initialized!');
+        }
+        if (!indexName.startsWith(ONYX_INDEX_PREFIX) || !/^[A-Za-z0-9_]+$/.test(indexName)) {
+            return Promise.reject(new Error(`dropIndex(): refusing to drop non-Onyx-managed index '${indexName}'.`));
+        }
+        return provider.store.executeAsync(`DROP INDEX IF EXISTS ${indexName};`).then(() => undefined);
     },
     removeItem(key) {
         if (!provider.store) {

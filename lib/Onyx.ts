@@ -24,6 +24,8 @@ import DevTools, {initDevTools} from './DevTools';
 import * as Logger from './Logger';
 import logMessages from './logMessages';
 import cache, {TASK} from './OnyxCache';
+import {reconcileIndexes as reconcileIndexesInternal, setIndexesConfig} from './OnyxIndexes';
+import type {ReconcileIndexesResult} from './OnyxIndexes';
 import connectionManager from './OnyxConnectionManager';
 import OnyxKeys from './OnyxKeys';
 import OnyxMerge from './OnyxMerge';
@@ -42,6 +44,7 @@ function init({
     ramOnlyKeys = [],
     snapshotMergeKeys = [],
     lazyCollections = [],
+    indexes = {},
 }: InitOptions): void {
     initDevTools(enableDevTools);
 
@@ -55,6 +58,9 @@ function init({
     // Must be configured before initStoreValues/initializeWithDefaultKeyStates — both the empty-
     // snapshot seeding and the initial data load consult the lazy set.
     cache.setLazyCollections(new Set<OnyxKey>(lazyCollections));
+
+    // Declarations only — nothing is built until the app calls Onyx.reconcileIndexes() (from idle).
+    setIndexesConfig(indexes);
 
     if (shouldSyncMultipleInstances) {
         Storage.keepInstancesSync?.((key, value) => {
@@ -595,6 +601,15 @@ function getHydrationStatus(collectionKey: OnyxKey): HydrationState {
     return cache.getHydrationState(collectionKey);
 }
 
+/**
+ * Applies the `indexes` declaration from Onyx.init to storage: creates declared-but-missing indexes
+ * and drops Onyx-managed indexes no longer declared in code. Call from idle after startup — an index
+ * build is O(collection) and must never sit on the boot path.
+ */
+function reconcileIndexes(): Promise<ReconcileIndexesResult> {
+    return OnyxUtils.afterInit(() => reconcileIndexesInternal());
+}
+
 const Onyx = {
     METHOD: OnyxUtils.METHOD,
     connect,
@@ -610,6 +625,7 @@ const Onyx = {
     init,
     hydrate,
     getHydrationStatus,
+    reconcileIndexes,
     registerLogger: Logger.registerLogger,
 };
 

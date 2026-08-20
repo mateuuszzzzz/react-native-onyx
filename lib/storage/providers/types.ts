@@ -99,6 +99,22 @@ type StorageProvider<TStore> = {
     queryByPrefix?: (prefix: OnyxKey, query: StorageCollectionQuery) => Promise<StorageKeyValuePair[]>;
 
     /**
+     * Lists the names of Onyx-managed indexes (the `onyx_idx_` namespace) present in storage.
+     * Optional — index support is provider-specific (SQLite only today).
+     */
+    listOnyxIndexes?: () => Promise<string[]>;
+
+    /**
+     * Creates an index accelerating `queryByPrefix` over one collection field. Optional.
+     */
+    createCollectionIndex?: (indexName: string, collectionPrefix: OnyxKey, field: string) => Promise<void>;
+
+    /**
+     * Drops an Onyx-managed index by name. Optional.
+     */
+    dropIndex?: (indexName: string) => Promise<void>;
+
+    /**
      * Removes given key and its value from storage
      */
     removeItem: (key: OnyxKey) => Promise<void>;
