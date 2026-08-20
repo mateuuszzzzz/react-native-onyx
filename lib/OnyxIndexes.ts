@@ -18,7 +18,7 @@ import type {OnyxKey} from './types';
 import * as Logger from './Logger';
 import Storage from './storage';
 
-type OnyxIndexesConfig = Record<OnyxKey, string[]>;
+type OnyxIndexesConfig = Partial<Record<OnyxKey, string[]>>;
 
 type ReconcileIndexesResult = {
     /** Whether the active storage provider supports indexes at all. */
@@ -58,6 +58,9 @@ function reconcileIndexes(): Promise<ReconcileIndexesResult> {
 
     const desired = new Map<string, {collectionPrefix: OnyxKey; field: string}>();
     for (const [collectionPrefix, fields] of Object.entries(indexesConfig)) {
+        if (!fields) {
+            continue;
+        }
         for (const field of fields) {
             if (!IDENTIFIER_PATTERN.test(field)) {
                 Logger.logAlert(`[OnyxIndexes] Skipping index with invalid field name '${field}' on '${collectionPrefix}'.`);
