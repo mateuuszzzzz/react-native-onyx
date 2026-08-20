@@ -37,6 +37,7 @@ import * as Logger from './Logger';
 import logMessages from './logMessages';
 import cache, {TASK} from './OnyxCache';
 import OnyxKeys from './OnyxKeys';
+import {notifyQueryWatchers} from './OnyxQuery';
 import Storage from './storage';
 import {StorageErrorClass} from './storage/errors';
 import StorageCircuitBreaker from './StorageCircuitBreaker';
@@ -605,6 +606,12 @@ function keysChanged<TKey extends CollectionKeyBase>(
         }
     }
 
+    // Live-query watchers observe every member write regardless of hydration state (cheap no-op
+    // when no query is active).
+    for (const memberKey of changedMemberKeys) {
+        notifyQueryWatchers(memberKey, partialCollection?.[memberKey]);
+    }
+
     // Notify collection-level subscribers. Skipped while a lazy collection is not fully hydrated —
     // the hydration completion re-broadcasts with the complete snapshot (and if hydration hasn't been
     // triggered yet, kick it off so those subscribers converge).
@@ -667,6 +674,12 @@ function keyChanged<TKey extends OnyxKey>(
         cache.addLastAccessedKey(key, OnyxKeys.isCollectionKey(key));
     } else {
         cache.removeLastAccessedKey(key);
+    }
+
+    // Live-query watchers observe every write (cheap no-op when no query is active). Collection
+    // updates notify their watchers from keysChanged instead, mirroring the subscriber dedup below.
+    if (!isProcessingCollectionUpdate) {
+        notifyQueryWatchers(key, value);
     }
 
     // We get the subscribers interested in the key that has just changed. If the subscriber's  key is a collection key then we will

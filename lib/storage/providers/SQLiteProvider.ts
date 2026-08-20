@@ -9,7 +9,7 @@ import {open} from 'react-native-nitro-sqlite';
 
 import type {FastMergeReplaceNullPatch} from '../../utils';
 import type StorageProvider from './types';
-import type {StorageKeyList, StorageKeyValuePair} from './types';
+import type {StorageCollectionQuery, StorageKeyList, StorageKeyValuePair} from './types';
 
 import utils from '../../utils';
 import classifySQLiteError from './classifySQLiteError';
@@ -305,6 +305,97 @@ const provider: StorageProvider<NitroSQLiteConnection | undefined> = {
                 }
                 return JSON.parse(aggregated) as StorageKeyValuePair[];
             });
+    },
+    queryByPrefix(prefix, query) {
+        if (!provider.store) {
+            throw new Error('Store is not initialized!');
+        }
+
+        // Field names are embedded in the generated SQL (values always travel as bound parameters),
+        // so they must be plain identifiers. The generated predicates mirror the JS evaluator in
+        // OnyxQuery exactly: `IS`/`IS NOT` for null-safe (in)equality, IN extended with an IS NULL
+        // arm when the list contains null, and range operators that exclude null fields.
+        const IDENTIFIER_PATTERN = /^[A-Za-z0-9_]+$/;
+        const fieldExpression = (field: string): string => {
+            if (!IDENTIFIER_PATTERN.test(field)) {
+                throw new Error(`queryByPrefix(): invalid field name '${field}'.`);
+            }
+            return `json_extract(valueJSON, '$.${field}')`;
+        };
+
+        // Keyset cursors over a null sort value would need three-armed SQL that is not worth
+        // generating — callers fall back to the in-JS path for that page.
+        if (query.after && query.after.sortValue === null) {
+            return Promise.reject(new Error('queryByPrefix(): null-sort cursors are not supported natively.'));
+        }
+
+        const upperBound = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+        const clauses: string[] = ['record_key >= ?', 'record_key < ?'];
+        const params: Array<string | number | boolean | null> = [prefix, upperBound];
+
+        for (const condition of query.where ?? []) {
+            const expression = fieldExpression(condition.field);
+            switch (condition.operator) {
+                case 'eq':
+                    clauses.push(`${expression} IS ?`);
+                    params.push(condition.value);
+                    break;
+                case 'neq':
+                    clauses.push(`${expression} IS NOT ?`);
+                    params.push(condition.value);
+                    break;
+                case 'in': {
+                    const nonNullValues = condition.value.filter((value) => value !== null);
+                    const placeholders = nonNullValues.map(() => '?').join(',');
+                    const inClause = nonNullValues.length > 0 ? `${expression} IN (${placeholders})` : '0';
+                    clauses.push(condition.value.length > nonNullValues.length ? `(${inClause} OR ${expression} IS NULL)` : `(${inClause})`);
+                    params.push(...nonNullValues);
+                    break;
+                }
+                case 'gt':
+                case 'gte':
+                case 'lt':
+                case 'lte': {
+                    const operatorSQL = {gt: '>', gte: '>=', lt: '<', lte: '<='}[condition.operator];
+                    clauses.push(`${expression} ${operatorSQL} ?`);
+                    params.push(condition.value);
+                    break;
+                }
+                default:
+                    throw new Error('queryByPrefix(): unsupported operator.');
+            }
+        }
+
+        const sortExpression = fieldExpression(query.orderBy.field);
+        const isAscending = query.orderBy.direction === 'asc';
+        if (query.after) {
+            if (isAscending) {
+                // Nulls sort first ascending, so anything after a non-null cursor is non-null — the
+                // strict comparison excludes null sort values naturally.
+                clauses.push(`(${sortExpression} > ? OR (${sortExpression} IS ? AND record_key > ?))`);
+            } else {
+                // Nulls sort last descending — they come after every non-null cursor.
+                clauses.push(`(${sortExpression} < ? OR (${sortExpression} IS ? AND record_key < ?) OR ${sortExpression} IS NULL)`);
+            }
+            params.push(query.after.sortValue, query.after.sortValue, query.after.recordKey);
+        }
+
+        const direction = isAscending ? 'ASC' : 'DESC';
+        const command = `SELECT json_group_array(json_array(record_key, json(valueJSON))) AS aggregated FROM (
+            SELECT record_key, valueJSON FROM keyvaluepairs
+            WHERE ${clauses.join(' AND ')}
+            ORDER BY ${sortExpression} ${direction}, record_key ${direction}
+            LIMIT ?
+        );`;
+        params.push(query.limit);
+
+        return provider.store.executeAsync<{aggregated: string | null}>(command, params as string[]).then(({rows}) => {
+            const aggregated = rows?.item(0)?.aggregated;
+            if (aggregated == null) {
+                return [];
+            }
+            return JSON.parse(aggregated) as StorageKeyValuePair[];
+        });
     },
     removeItem(key) {
         if (!provider.store) {

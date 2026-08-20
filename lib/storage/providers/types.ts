@@ -15,6 +15,20 @@ type DatabaseSize = {
 
 type OnStorageKeyChanged = <TKey extends OnyxKey>(key: TKey, value: OnyxValue<TKey>) => void;
 
+/**
+ * Storage-level shape of a collection query. Field names must be simple identifiers (they are
+ * embedded in generated SQL after validation); values travel as bound parameters.
+ */
+type StorageCollectionQuery = {
+    where?: Array<
+        | {field: string; operator: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'; value: string | number | boolean | null}
+        | {field: string; operator: 'in'; value: Array<string | number | boolean | null>}
+    >;
+    orderBy: {field: string; direction: 'asc' | 'desc'};
+    limit: number;
+    after?: {sortValue: string | number | boolean | null; recordKey: OnyxKey};
+};
+
 type StorageProvider<TStore> = {
     store: TStore;
 
@@ -78,6 +92,13 @@ type StorageProvider<TStore> = {
     getByPrefix?: (prefix: OnyxKey) => Promise<StorageKeyValuePair[]>;
 
     /**
+     * Executes a filtered/ordered/limited read over the members of a collection prefix, returning
+     * only the matching rows (the point: only `limit` rows are parsed and returned to JS, not the
+     * whole collection). Optional — callers fall back to `getByPrefix` + in-JS evaluation.
+     */
+    queryByPrefix?: (prefix: OnyxKey, query: StorageCollectionQuery) => Promise<StorageKeyValuePair[]>;
+
+    /**
      * Removes given key and its value from storage
      */
     removeItem: (key: OnyxKey) => Promise<void>;
@@ -111,4 +132,4 @@ type StorageProvider<TStore> = {
 };
 
 export default StorageProvider;
-export type {StorageKeyList, StorageKeyValuePair, OnStorageKeyChanged};
+export type {StorageKeyList, StorageKeyValuePair, OnStorageKeyChanged, StorageCollectionQuery};

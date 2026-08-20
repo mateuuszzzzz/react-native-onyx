@@ -1,5 +1,7 @@
 import type {ConnectOptions, OnyxUpdate} from './Onyx';
-import Onyx from './Onyx';
+import type {Connection} from './OnyxConnectionManager';
+import type {CollectionQuery, OrderBy, QueryCursor, QueryResult, QueryResultItem, WhereCondition} from './OnyxQuery';
+import type {OnyxSQLiteKeyValuePair} from './storage/providers/SQLiteProvider';
 import type {
     CustomTypeOptions,
     KeyValueMapping,
@@ -19,12 +21,16 @@ import type {
     OnyxSetCollectionInput,
 } from './types';
 import type {FetchStatus, ResultMetadata, UseOnyxResult, UseOnyxOptions} from './useOnyx';
-import type {Connection} from './OnyxConnectionManager';
+import type {UseOnyxQueryOptions, UseOnyxQueryResult} from './useOnyxQuery';
+
+import Onyx from './Onyx';
+import {queryCollection} from './OnyxQuery';
 import useOnyx from './useOnyx';
-import type {OnyxSQLiteKeyValuePair} from './storage/providers/SQLiteProvider';
+import useOnyxQuery from './useOnyxQuery';
 
 export default Onyx;
-export {useOnyx};
+export {useOnyx, useOnyxQuery, queryCollection};
+export type {CollectionQuery, OrderBy, QueryCursor, QueryResult, QueryResultItem, WhereCondition, UseOnyxQueryOptions, UseOnyxQueryResult};
 export type {
     ConnectOptions,
     CustomTypeOptions,
