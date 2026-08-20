@@ -292,7 +292,16 @@ class OnyxCache {
      * they are newer than storage (cache-first writes).
      */
     hydrate(data: Record<OnyxKey, OnyxValue<OnyxKey>>): void {
+        const isInitialLoad = this.storageKeys.size === 0;
         for (const [key, value] of Object.entries(data)) {
+            // The key index is authoritative and hydration never discovers new keys — a key missing
+            // from the index was deleted after this storage read started (remove() drops the index
+            // entry synchronously but persists the deletion asynchronously), so accepting it here
+            // would resurrect the deleted row. Skipped except during the initial load, where the
+            // index is populated from this very data set.
+            if (!isInitialLoad && !this.storageKeys.has(key)) {
+                continue;
+            }
             this.addKey(key);
 
             if (value === null || value === undefined) {
